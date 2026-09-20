@@ -22,34 +22,71 @@ jobs:
       - name: Asenna ja kätkötä Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Varmista gradlew-skripti
+      - name: Luo vaadittu Keystore (my-upload-key.jks)
         run: |
-          if [ ! -f "gradlew" ]; then
-            echo "gradlew-tiedostoa ei löytynyt, luodaan wrapper..."
-            gradle wrapper
-          fi
-          chmod +x gradlew
-
-      - name: Luo Release Keystore
-        run: |
-          keytool -genkey -v -keystore release.keystore \
+          # Luodaan juuri se tiedosto, jota build.gradle yrittää etsiä
+          keytool -genkey -v -keystore my-upload-key.jks \
             -alias releasekey -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android -keypass android \
             -dname "CN=Release,O=App,C=FI"
 
-      - name: Rakenna Release APK
+      - name: Luo väliaikainen google-services.json (estää puuttumisvirheen)
+        run: |
+          echo '{
+            "project_info": {"project_number": "123","project_id": "dummy"},
+            "client": [{
+              "client_info": {
+                "mobilesdk_app_id": "1:123:android:123",
+                "android_client_info": {"package_name": "com.example"}
+              },
+              "api_key": [{"current_key": "dummy"}]
+            }]
+          }' > app/google-services.json
+
+      - name: Varmista gradlew-skripti
+        run: |
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
+
+      - name: Rakenna ja Allekirjoita APK (Täydellinen ohitus)
         env:
           GRADLE_OPTS: "-Xmx4g -Djava.awt.headless=true -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process"
         run: |
-          ./gradlew assembleRelease -x lint -x lintVitalRelease --no-daemon --stacktrace
+          # Pakotetaan Gradle käyttämään luomaamme Keystore-tiedostoa ja salasanoja (android), 
+          # riippumatta siitä mitä build.gradle:en on koodattu. Tämä takaa virheettömän signauksen.
+          ./gradlew assembleRelease -x lint -x lintVitalRelease \
+            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/my-upload-key.jks \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=releasekey \
+            -Pandroid.injected.signing.key.password=android \
+            --no-daemon --stacktrace
 
-      - name: Zip-align ja Allekirjoita APK (apksigner)
+      - name: Lataa APK suoraan linkiksi (Ei GitHubiin)
         run: |
-          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | tail -n 1)
-          RAW_APK=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
+          APK_PATH=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "APK-tiedostoa ei löytynyt!"
+            exit 1
+          fi
           
-          $BUILD_TOOLS/zipalign -v -p 4 "$RAW_APK" app-aligned.apk
-          $BUILD_TOOLS/apksigner sign --ks release.keystore --ks-pass pass:android --key-pass pass:android --out Rakenna_AP3K.apk app-aligned.apk
+          # Nimetään pyyntösi mukaisesti
+          mv "$APK_PATH" Rakenna_AP3K.apk
           
-          echo "Allekirjoitettu APK luotu onnistuneesti."
+          echo "================================================================"
+          echo "✅ APK RAKENNETTU JA SIGNATTU ONNISTUNEESTI!"
+          echo "Ladataan APK ulkoiseen palveluun (ohittaa GitHubin tallennustilarajan)..."
+          echo "================================================================"
+          
+          echo "🔗 Latauslinkki 1 (BashUpload):"
+          curl -T Rakenna_AP3K.apk bashupload.com
+          echo ""
+          
+          echo "🔗 Latauslinkki 2 (Keep.sh):"
+          curl -T Rakenna_AP3K.apk https://free.keep.sh/Rakenna_AP3K.apk
+          echo ""
+          
+          echo "================================================================"
+          echo "Avaa yllä oleva linkki selaimessa ladataksesi valmiin APK:n puhelimeesi."
           
