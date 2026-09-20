@@ -1,0 +1,6 @@
+{
+  "name": "Rendera",
+  "description": "AI-powered real-time game screen reader and auto-dodge joystick companion",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
