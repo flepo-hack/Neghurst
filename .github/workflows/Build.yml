@@ -22,6 +22,14 @@ jobs:
       - name: Asenna ja kätkötä Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Varmista gradlew-skripti
+        run: |
+          if [ ! -f "gradlew" ]; then
+            echo "gradlew-tiedostoa ei löytynyt, luodaan wrapper..."
+            gradle wrapper
+          fi
+          chmod +x gradlew
+
       - name: Luo Release Keystore
         run: |
           keytool -genkey -v -keystore release.keystore \
@@ -33,7 +41,6 @@ jobs:
         env:
           GRADLE_OPTS: "-Xmx4g -Djava.awt.headless=true -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process"
         run: |
-          chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Zip-align ja Allekirjoita APK (apksigner)
