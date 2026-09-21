@@ -39,6 +39,7 @@ import com.example.model.DetectionStats
 import com.example.model.DodgeProfile
 import com.example.model.ThreatLevel
 import com.example.model.ThreatVector
+import com.example.ui.components.RenderaDebugHudView
 import com.example.vision.GeminiTacticalAdvisor
 import com.example.vision.ScreenThreatDetector
 import kotlinx.coroutines.CoroutineScope
@@ -100,6 +101,7 @@ class RenderaOverlayService : Service() {
     private var bubbleBgDrawable: android.graphics.drawable.GradientDrawable? = null
     private var hudMenuView: View? = null
     private var calibrationOverlayView: View? = null
+    private var debugHudView: RenderaDebugHudView? = null
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -111,6 +113,59 @@ class RenderaOverlayService : Service() {
     private var fpsCounter = 0
     private var lastFpsTimestamp = System.currentTimeMillis()
     private var activeGame = "Universal"
+
+    fun showDebugHud() {
+        if (debugHudView != null) return
+        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+        val hudParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            layoutType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+
+        val hud = RenderaDebugHudView(this)
+        debugHudView = hud
+        try {
+            windowManager.addView(hud, hudParams)
+            Log.i(TAG, "Rendera Tactical Debug HUD Overlay successfully attached.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to attach Debug HUD Overlay", e)
+            debugHudView = null
+        }
+    }
+
+    fun removeDebugHud() {
+        debugHudView?.let {
+            try {
+                windowManager.removeView(it)
+                Log.i(TAG, "Rendera Tactical Debug HUD Overlay removed.")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error removing debug HUD view", e)
+            }
+            debugHudView = null
+        }
+    }
+
+    fun toggleDebugHud() {
+        val newState = !prefs.isDebugOverlayEnabled.value
+        prefs.setDebugOverlayEnabled(newState)
+        if (newState) {
+            showDebugHud()
+        } else {
+            removeDebugHud()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -173,6 +228,9 @@ class RenderaOverlayService : Service() {
                 startInForeground()
                 setupMediaProjection(resultCode, data)
                 showFloatingBubble()
+                if (prefs.isDebugOverlayEnabled.value) {
+                    showDebugHud()
+                }
                 startDetectionLoop()
                 isRunning = true
             }
@@ -523,6 +581,33 @@ class RenderaOverlayService : Service() {
             }
             addView(calibBtn)
 
+            // Radar Debug HUD Toggle Button
+            val isHudOn = prefs.isDebugOverlayEnabled.value
+            val hudToggleBtn = TextView(this@RenderaOverlayService).apply {
+                text = if (isHudOn) "🔍 Radar Debug HUD: [PÄÄLLÄ]" else "🔍 Radar Debug HUD: [POIS]"
+                setTextColor(if (isHudOn) android.graphics.Color.argb(255, 5, 255, 161) else android.graphics.Color.argb(255, 200, 210, 225))
+                textSize = 12f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+                val btnBg = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.argb(140, 16, 28, 40))
+                    cornerRadius = 12 * resources.displayMetrics.density
+                    setStroke(1, if (isHudOn) android.graphics.Color.argb(200, 5, 255, 161) else android.graphics.Color.argb(120, 100, 120, 140))
+                }
+                background = btnBg
+                val p = (10 * resources.displayMetrics.density).toInt()
+                setPadding(p, p, p, p)
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                lp.topMargin = (8 * resources.displayMetrics.density).toInt()
+                layoutParams = lp
+                setOnClickListener {
+                    toggleDebugHud()
+                    removeHudMenu()
+                    triggerHapticFeedback(30L)
+                }
+            }
+            addView(hudToggleBtn)
+
             // AI Tactical Advisor Button
             val aiBtn = TextView(this@RenderaOverlayService).apply {
                 text = "✨ Gemini Tactical Analysis"
@@ -636,6 +721,58 @@ class RenderaOverlayService : Service() {
             setBackgroundColor(android.graphics.Color.argb(135, 0, 0, 0))
         }
 
+        // Joystick Reticle Ring (Cyan)
+        val joyRing = FrameLayout(this).apply {
+            val bg = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(android.graphics.Color.argb(70, 0, 240, 255))
+                setStroke(4, android.graphics.Color.argb(255, 0, 240, 255), 10f, 8f)
+            }
+            background = bg
+
+            val cross = TextView(this@RenderaOverlayService).apply {
+                text = "JOYSTICK"
+                textSize = 10f
+                setTextColor(android.graphics.Color.WHITE)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+            }
+            addView(cross, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+
+        val joyRingParams = FrameLayout.LayoutParams(reticleDiameterPx, reticleDiameterPx).apply {
+            leftMargin = (currentJoyX - reticleRadiusPx).toInt().coerceIn(0, screenWidth - reticleDiameterPx)
+            topMargin = (currentJoyY - reticleRadiusPx).toInt().coerceIn(0, screenHeight - reticleDiameterPx)
+        }
+        rootOverlay.addView(joyRing, joyRingParams)
+
+        // Player Reticle Ring (Lime Green)
+        val playerRadiusPx = 80f
+        val playerDiameterPx = (playerRadiusPx * 2).toInt()
+        val playerRing = FrameLayout(this).apply {
+            val bg = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(android.graphics.Color.argb(80, 5, 255, 161))
+                setStroke(4, android.graphics.Color.argb(255, 5, 255, 161))
+            }
+            background = bg
+
+            val pText = TextView(this@RenderaOverlayService).apply {
+                text = "PLAYER"
+                textSize = 9f
+                setTextColor(android.graphics.Color.WHITE)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                gravity = Gravity.CENTER
+            }
+            addView(pText, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+
+        val playerRingParams = FrameLayout.LayoutParams(playerDiameterPx, playerDiameterPx).apply {
+            leftMargin = (currentPlayerX - playerRadiusPx).toInt().coerceIn(0, screenWidth - playerDiameterPx)
+            topMargin = (currentPlayerY - playerRadiusPx).toInt().coerceIn(0, screenHeight - playerDiameterPx)
+        }
+        rootOverlay.addView(playerRing, playerRingParams)
+
         // Header Instructions & Mode Switcher
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -707,6 +844,56 @@ class RenderaOverlayService : Service() {
             switchRow.addView(playerTabBtn)
             addView(switchRow)
 
+            val autoDetectBtn = TextView(this@RenderaOverlayService).apply {
+                text = "✨ SMART AUTO-DETECT (Tunnista peli ruudulta)"
+                setTextColor(android.graphics.Color.argb(255, 255, 215, 0))
+                textSize = 12f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                val bg = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.argb(170, 42, 32, 12))
+                    cornerRadius = 12 * resources.displayMetrics.density
+                    setStroke(1, android.graphics.Color.argb(230, 255, 215, 0))
+                }
+                background = bg
+                val p = (8 * resources.displayMetrics.density).toInt()
+                setPadding(p * 2, p, p * 2, p)
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                lp.topMargin = (10 * resources.displayMetrics.density).toInt()
+                layoutParams = lp
+                setOnClickListener {
+                    val frame = acquireCurrentFrameBitmap()
+                    if (frame != null) {
+                        val (joy, player) = threatDetector.autoCalibrateFromFrame(
+                            frame = frame,
+                            screenWidth = screenWidth,
+                            screenHeight = screenHeight,
+                            activeWidth = activeCaptureWidth,
+                            activeHeight = activeCaptureHeight
+                        )
+                        currentJoyX = joy.first
+                        currentJoyY = joy.second
+                        currentPlayerX = player.first
+                        currentPlayerY = player.second
+                    } else {
+                        currentJoyX = 0.20f * screenWidth
+                        currentJoyY = 0.78f * screenHeight
+                        currentPlayerX = 0.50f * screenWidth
+                        currentPlayerY = 0.50f * screenHeight
+                    }
+                    joyRingParams.leftMargin = (currentJoyX - reticleRadiusPx).toInt().coerceIn(0, screenWidth - reticleDiameterPx)
+                    joyRingParams.topMargin = (currentJoyY - reticleRadiusPx).toInt().coerceIn(0, screenHeight - reticleDiameterPx)
+                    joyRing.layoutParams = joyRingParams
+
+                    playerRingParams.leftMargin = (currentPlayerX - playerRadiusPx).toInt().coerceIn(0, screenWidth - playerDiameterPx)
+                    playerRingParams.topMargin = (currentPlayerY - playerRadiusPx).toInt().coerceIn(0, screenHeight - playerDiameterPx)
+                    playerRing.layoutParams = playerRingParams
+
+                    subLabel.text = "✨ Automaattisesti kalibroitu Brawl Starsille! Voit edelleen säätää koskettamalla."
+                    triggerHapticFeedback(50L)
+                }
+            }
+            addView(autoDetectBtn)
+
             joyTabBtn.setOnClickListener {
                 activeEditMode = "JOYSTICK"
                 subLabel.text = "Touch screen to move the JOYSTICK anchor."
@@ -728,58 +915,6 @@ class RenderaOverlayService : Service() {
             }
         }
         rootOverlay.addView(header)
-
-        // Joystick Reticle Ring (Cyan)
-        val joyRing = FrameLayout(this).apply {
-            val bg = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(android.graphics.Color.argb(70, 0, 240, 255))
-                setStroke(4, android.graphics.Color.argb(255, 0, 240, 255), 10f, 8f)
-            }
-            background = bg
-
-            val cross = TextView(this@RenderaOverlayService).apply {
-                text = "JOYSTICK"
-                textSize = 10f
-                setTextColor(android.graphics.Color.WHITE)
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-            }
-            addView(cross, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        }
-
-        val joyRingParams = FrameLayout.LayoutParams(reticleDiameterPx, reticleDiameterPx).apply {
-            leftMargin = (currentJoyX - reticleRadiusPx).toInt().coerceIn(0, screenWidth - reticleDiameterPx)
-            topMargin = (currentJoyY - reticleRadiusPx).toInt().coerceIn(0, screenHeight - reticleDiameterPx)
-        }
-        rootOverlay.addView(joyRing, joyRingParams)
-
-        // Player Reticle Ring (Lime Green)
-        val playerRadiusPx = 80f
-        val playerDiameterPx = (playerRadiusPx * 2).toInt()
-        val playerRing = FrameLayout(this).apply {
-            val bg = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(android.graphics.Color.argb(80, 5, 255, 161))
-                setStroke(4, android.graphics.Color.argb(255, 5, 255, 161))
-            }
-            background = bg
-
-            val pText = TextView(this@RenderaOverlayService).apply {
-                text = "PLAYER"
-                textSize = 9f
-                setTextColor(android.graphics.Color.WHITE)
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-            }
-            addView(pText, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        }
-
-        val playerRingParams = FrameLayout.LayoutParams(playerDiameterPx, playerDiameterPx).apply {
-            leftMargin = (currentPlayerX - playerRadiusPx).toInt().coerceIn(0, screenWidth - playerDiameterPx)
-            topMargin = (currentPlayerY - playerRadiusPx).toInt().coerceIn(0, screenHeight - playerDiameterPx)
-        }
-        rootOverlay.addView(playerRing, playerRingParams)
 
         // Screen Touch Drag
         rootOverlay.setOnTouchListener { _, event ->
@@ -906,6 +1041,16 @@ class RenderaOverlayService : Service() {
                                 totalThreats++
                                 executeAutoDodge(threat, profile, result.joystickX, result.joystickY)
                             }
+
+                            val loopElapsed = (System.currentTimeMillis() - loopStartTime)
+                            val isAccActive = RenderaAccessibilityService.isAvailable()
+                            debugHudView?.updateAnalysis(
+                                result = result,
+                                fps = if (fpsCounter > 0) fpsCounter else 60,
+                                latencyMs = loopElapsed,
+                                isAccessibilityActive = isAccActive,
+                                isAutoDodgeEnabled = profile.autoDodgeEnabled
+                            )
 
                             fpsCounter++
                             val now = System.currentTimeMillis()
@@ -1056,6 +1201,7 @@ class RenderaOverlayService : Service() {
 
         removeCalibrationOverlay()
         removeHudMenu()
+        removeDebugHud()
 
         floatingBubbleView?.let {
             try {

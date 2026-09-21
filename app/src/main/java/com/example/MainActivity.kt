@@ -181,6 +181,7 @@ class MainActivity : ComponentActivity() {
         var hasMediaProjection by remember { mutableStateOf(screenCaptureResultCode != 0) }
 
         val profile by prefs.currentProfile.collectAsState()
+        val isDebugOverlayEnabled by prefs.isDebugOverlayEnabled.collectAsState()
         var installedApps by remember { mutableStateOf<List<GameAppInfo>>(emptyList()) }
         var showGameSelectDialog by remember { mutableStateOf(false) }
 
@@ -435,6 +436,69 @@ class MainActivity : ComponentActivity() {
                                         inactiveTrackColor = Color(0xFF331D56)
                                     )
                                 )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(18.dp))
+
+                        // TACTICAL RADAR & IN-GAME DEBUG HUD CARD
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(Color(0xFF170C29))
+                                .border(BorderStroke(1.dp, Color(0xFF00F0FF)), RoundedCornerShape(16.dp))
+                                .padding(16.dp)
+                        ) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "TACTICAL RADAR & DEBUG HUD",
+                                            color = NeonCyan,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 1.sp
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "Visuaalinen tähtäin ja laatikot suoraan peliin: oma hahmo (vihreä), joystick ja väistövektori (violetti), viholliset (punainen), ammukset (keltainen).",
+                                            color = Color(0xFFC7B8E0),
+                                            fontSize = 11.sp,
+                                            lineHeight = 15.sp
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.width(12.dp))
+
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(20.dp))
+                                            .background(if (isDebugOverlayEnabled) Color(0xFF0F3822) else Color(0xFF2B1B3D))
+                                            .border(
+                                                BorderStroke(
+                                                    1.5.dp,
+                                                    if (isDebugOverlayEnabled) SafeGreen else Color(0xFF6B4C8A)
+                                                ),
+                                                RoundedCornerShape(20.dp)
+                                            )
+                                            .clickable {
+                                                prefs.setDebugOverlayEnabled(!isDebugOverlayEnabled)
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isDebugOverlayEnabled) "PÄÄLLÄ" else "POIS",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isDebugOverlayEnabled) SafeGreen else Color(0xFFE0AAFF)
+                                        )
+                                    }
+                                }
                             }
                         }
 

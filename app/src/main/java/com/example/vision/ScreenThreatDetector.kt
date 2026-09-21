@@ -1,7 +1,9 @@
 package com.example.vision
 
 import android.graphics.Bitmap
+import com.example.model.DetectedEntity
 import com.example.model.DodgeProfile
+import com.example.model.EntityType
 import com.example.model.ThreatLevel
 import com.example.model.ThreatVector
 import kotlin.math.abs
@@ -91,7 +93,9 @@ class ScreenThreatDetector {
         val joystickY: Float,
         val isJoystickTracked: Boolean,
         val enemyCount: Int,
-        val wallCount: Int
+        val wallCount: Int,
+        val debugEntities: List<DetectedEntity> = emptyList(),
+        val dodgeAngleDeg: Float? = null
     )
 
     private val trackedEntities = ArrayList<TrackedCluster>(16)
@@ -205,7 +209,7 @@ class ScreenThreatDetector {
 
                 // Brawl Stars player indicator ring: distinctive neon-lime under feet
                 // High saturation, vibrant luminance, narrow hue band distinguishing from dark foliage
-                val isGreenPlayerIndicator = (h in 86f..146f) && s >= 0.50f && v >= 0.42f
+                val isGreenPlayerIndicator = (h in 80f..155f) && s >= 0.45f && v >= 0.40f
 
                 if (isGreenPlayerIndicator && greenCandCount < greenCandX.size) {
                     greenCandX[greenCandCount] = worldX
@@ -489,6 +493,18 @@ class ScreenThreatDetector {
         // If no projectile pixels found in danger zone, environment is safe
         if (projectileCount < 3) {
             decayTrackedEntities()
+            val entities = buildDebugEntities(
+                playerX = currentPlayerX,
+                playerY = currentPlayerY,
+                isPlayerLocked = isPlayerLocked,
+                joyX = currentJoyX,
+                joyY = currentJoyY,
+                joyRadius = joyRadiusPx,
+                enemyX = enemyBrawlerX,
+                enemyY = enemyBrawlerY,
+                enemyCount = enemyCount,
+                threat = null
+            )
             return FrameAnalysisResult(
                 threat = null,
                 playerX = currentPlayerX,
@@ -498,7 +514,9 @@ class ScreenThreatDetector {
                 joystickY = currentJoyY,
                 isJoystickTracked = isJoyLocked,
                 enemyCount = enemyCount,
-                wallCount = wallCount
+                wallCount = wallCount,
+                debugEntities = entities,
+                dodgeAngleDeg = null
             )
         }
 
@@ -518,6 +536,18 @@ class ScreenThreatDetector {
 
         if (sumW < 4.0f) {
             decayTrackedEntities()
+            val entities = buildDebugEntities(
+                playerX = currentPlayerX,
+                playerY = currentPlayerY,
+                isPlayerLocked = isPlayerLocked,
+                joyX = currentJoyX,
+                joyY = currentJoyY,
+                joyRadius = joyRadiusPx,
+                enemyX = enemyBrawlerX,
+                enemyY = enemyBrawlerY,
+                enemyCount = enemyCount,
+                threat = null
+            )
             return FrameAnalysisResult(
                 threat = null,
                 playerX = currentPlayerX,
@@ -527,7 +557,9 @@ class ScreenThreatDetector {
                 joystickY = currentJoyY,
                 isJoystickTracked = isJoyLocked,
                 enemyCount = enemyCount,
-                wallCount = wallCount
+                wallCount = wallCount,
+                debugEntities = entities,
+                dodgeAngleDeg = null
             )
         }
 
@@ -541,6 +573,23 @@ class ScreenThreatDetector {
 
         // Reject slow non-projectile elements
         if (speed < projectileSpeedThreshold && activeEntity.trajectoryConsistency < 0.60f) {
+            val entities = buildDebugEntities(
+                playerX = currentPlayerX,
+                playerY = currentPlayerY,
+                isPlayerLocked = isPlayerLocked,
+                joyX = currentJoyX,
+                joyY = currentJoyY,
+                joyRadius = joyRadiusPx,
+                enemyX = enemyBrawlerX,
+                enemyY = enemyBrawlerY,
+                enemyCount = enemyCount,
+                threat = null,
+                projectileX = centroidX,
+                projectileY = centroidY,
+                projectileVx = velX,
+                projectileVy = velY,
+                hasBullet = true
+            )
             return FrameAnalysisResult(
                 threat = null,
                 playerX = currentPlayerX,
@@ -550,7 +599,9 @@ class ScreenThreatDetector {
                 joystickY = currentJoyY,
                 isJoystickTracked = isJoyLocked,
                 enemyCount = enemyCount,
-                wallCount = wallCount
+                wallCount = wallCount,
+                debugEntities = entities,
+                dodgeAngleDeg = null
             )
         }
 
@@ -561,6 +612,23 @@ class ScreenThreatDetector {
 
         // Reject slow non-projectile elements unless it is an immediate splash/AoE hazard next to the brawler
         if (speed < projectileSpeedThreshold && activeEntity.trajectoryConsistency < 0.60f && !isImmediateProximityHazard) {
+            val entities = buildDebugEntities(
+                playerX = currentPlayerX,
+                playerY = currentPlayerY,
+                isPlayerLocked = isPlayerLocked,
+                joyX = currentJoyX,
+                joyY = currentJoyY,
+                joyRadius = joyRadiusPx,
+                enemyX = enemyBrawlerX,
+                enemyY = enemyBrawlerY,
+                enemyCount = enemyCount,
+                threat = null,
+                projectileX = centroidX,
+                projectileY = centroidY,
+                projectileVx = velX,
+                projectileVy = velY,
+                hasBullet = true
+            )
             return FrameAnalysisResult(
                 threat = null,
                 playerX = currentPlayerX,
@@ -570,7 +638,9 @@ class ScreenThreatDetector {
                 joystickY = currentJoyY,
                 isJoystickTracked = isJoyLocked,
                 enemyCount = enemyCount,
-                wallCount = wallCount
+                wallCount = wallCount,
+                debugEntities = entities,
+                dodgeAngleDeg = null
             )
         }
 
@@ -578,6 +648,23 @@ class ScreenThreatDetector {
 
         // If projectile is moving distinctly away from player (and not on top of the player), no dodge needed
         if (dotProduct <= 0f && speed > 80f && !isImmediateProximityHazard) {
+            val entities = buildDebugEntities(
+                playerX = currentPlayerX,
+                playerY = currentPlayerY,
+                isPlayerLocked = isPlayerLocked,
+                joyX = currentJoyX,
+                joyY = currentJoyY,
+                joyRadius = joyRadiusPx,
+                enemyX = enemyBrawlerX,
+                enemyY = enemyBrawlerY,
+                enemyCount = enemyCount,
+                threat = null,
+                projectileX = centroidX,
+                projectileY = centroidY,
+                projectileVx = velX,
+                projectileVy = velY,
+                hasBullet = true
+            )
             return FrameAnalysisResult(
                 threat = null,
                 playerX = currentPlayerX,
@@ -587,7 +674,9 @@ class ScreenThreatDetector {
                 joystickY = currentJoyY,
                 isJoystickTracked = isJoyLocked,
                 enemyCount = enemyCount,
-                wallCount = wallCount
+                wallCount = wallCount,
+                debugEntities = entities,
+                dodgeAngleDeg = null
             )
         }
 
@@ -599,6 +688,23 @@ class ScreenThreatDetector {
 
         if (trajectoryClearance > playerHitboxRadius && distToPlayer > playerHitboxRadius * 1.6f && !isImmediateProximityHazard) {
             // Clean miss: projectile will pass safely without hitting the player
+            val entities = buildDebugEntities(
+                playerX = currentPlayerX,
+                playerY = currentPlayerY,
+                isPlayerLocked = isPlayerLocked,
+                joyX = currentJoyX,
+                joyY = currentJoyY,
+                joyRadius = joyRadiusPx,
+                enemyX = enemyBrawlerX,
+                enemyY = enemyBrawlerY,
+                enemyCount = enemyCount,
+                threat = null,
+                projectileX = centroidX,
+                projectileY = centroidY,
+                projectileVx = velX,
+                projectileVy = velY,
+                hasBullet = true
+            )
             return FrameAnalysisResult(
                 threat = null,
                 playerX = currentPlayerX,
@@ -608,7 +714,9 @@ class ScreenThreatDetector {
                 joystickY = currentJoyY,
                 isJoystickTracked = isJoyLocked,
                 enemyCount = enemyCount,
-                wallCount = wallCount
+                wallCount = wallCount,
+                debugEntities = entities,
+                dodgeAngleDeg = null
             )
         }
 
@@ -704,6 +812,19 @@ class ScreenThreatDetector {
             confidence = confidence
         )
 
+        val entities = buildDebugEntities(
+            playerX = currentPlayerX,
+            playerY = currentPlayerY,
+            isPlayerLocked = isPlayerLocked,
+            joyX = currentJoyX,
+            joyY = currentJoyY,
+            joyRadius = joyRadiusPx,
+            enemyX = enemyBrawlerX,
+            enemyY = enemyBrawlerY,
+            enemyCount = enemyCount,
+            threat = threat
+        )
+
         return FrameAnalysisResult(
             threat = threat,
             playerX = currentPlayerX,
@@ -713,7 +834,9 @@ class ScreenThreatDetector {
             joystickY = currentJoyY,
             isJoystickTracked = isJoyLocked,
             enemyCount = enemyCount,
-            wallCount = wallCount
+            wallCount = wallCount,
+            debugEntities = entities,
+            dodgeAngleDeg = dodgeAngleDeg
         )
     }
 
@@ -864,5 +987,230 @@ class ScreenThreatDetector {
         dynamicJoyX = x
         dynamicJoyY = y
         isJoyLocked = true
+    }
+
+    /**
+     * Clusters raw enemy detection points into discrete brawler targets with centers and radiuses.
+     */
+    fun clusterEnemies(enemyX: FloatArray, enemyY: FloatArray, count: Int): List<DetectedEntity> {
+        if (count == 0) return emptyList()
+        val clusters = ArrayList<DetectedEntity>()
+        val visited = BooleanArray(count)
+        val clusterRadiusSq = 90f * 90f
+
+        val maxIter = count.coerceAtMost(32)
+        for (i in 0 until maxIter) {
+            if (visited[i]) continue
+            visited[i] = true
+
+            var sumX = enemyX[i]
+            var sumY = enemyY[i]
+            var clusterCount = 1
+
+            for (j in (i + 1) until maxIter) {
+                if (visited[j]) continue
+                val dx = enemyX[j] - enemyX[i]
+                val dy = enemyY[j] - enemyY[i]
+                if (dx * dx + dy * dy <= clusterRadiusSq) {
+                    visited[j] = true
+                    sumX += enemyX[j]
+                    sumY += enemyY[j]
+                    clusterCount++
+                }
+            }
+
+            val avgX = sumX / clusterCount
+            val avgY = sumY / clusterCount
+            clusters.add(
+                DetectedEntity(
+                    type = EntityType.ENEMY,
+                    x = avgX,
+                    y = avgY,
+                    radius = 52f,
+                    label = "ENEMY #${clusters.size + 1}"
+                )
+            )
+            if (clusters.size >= 6) break
+        }
+        return clusters
+    }
+
+    /**
+     * Builds comprehensive list of detected battlefield entities for HUD debugging and tactical visualization.
+     */
+    private fun buildDebugEntities(
+        playerX: Float,
+        playerY: Float,
+        isPlayerLocked: Boolean,
+        joyX: Float,
+        joyY: Float,
+        joyRadius: Float,
+        enemyX: FloatArray,
+        enemyY: FloatArray,
+        enemyCount: Int,
+        threat: ThreatVector?,
+        projectileX: Float = 0f,
+        projectileY: Float = 0f,
+        projectileVx: Float = 0f,
+        projectileVy: Float = 0f,
+        hasBullet: Boolean = false
+    ): List<DetectedEntity> {
+        val list = ArrayList<DetectedEntity>()
+
+        // 1. Player
+        list.add(
+            DetectedEntity(
+                type = EntityType.PLAYER,
+                x = playerX,
+                y = playerY,
+                radius = 55f,
+                label = if (isPlayerLocked) "PLAYER (LOCKED)" else "PLAYER (CALIBRATED)"
+            )
+        )
+
+        // 2. Joystick
+        list.add(
+            DetectedEntity(
+                type = EntityType.JOYSTICK,
+                x = joyX,
+                y = joyY,
+                radius = joyRadius,
+                label = "JOYSTICK"
+            )
+        )
+
+        // 3. Enemies
+        val enemyEntities = clusterEnemies(enemyX, enemyY, enemyCount)
+        list.addAll(enemyEntities)
+
+        // 4. Threat / Active Projectile
+        if (threat != null) {
+            list.add(
+                DetectedEntity(
+                    type = EntityType.PROJECTILE,
+                    x = threat.threatX,
+                    y = threat.threatY,
+                    radius = 42f,
+                    vx = threat.velocityX,
+                    vy = threat.velocityY,
+                    label = "THREAT [${threat.threatLevel}] (${threat.speed.toInt()}px/s)"
+                )
+            )
+        } else if (hasBullet) {
+            list.add(
+                DetectedEntity(
+                    type = EntityType.PROJECTILE,
+                    x = projectileX,
+                    y = projectileY,
+                    radius = 35f,
+                    vx = projectileVx,
+                    vy = projectileVy,
+                    label = "PROJECTILE"
+                )
+            )
+        }
+
+        return list
+    }
+
+    /**
+     * Smart Auto-Detection of Joystick and Player anchors based on live screen pixels.
+     * Fallbacks to mathematically optimal Brawl Stars HUD bounds if elements are currently occluded.
+     */
+    fun autoCalibrateFromFrame(
+        frame: Bitmap,
+        screenWidth: Int,
+        screenHeight: Int,
+        activeWidth: Int = frame.width,
+        activeHeight: Int = frame.height
+    ): Pair<Pair<Float, Float>, Pair<Float, Float>> {
+        val frameW = frame.width
+        val frameH = frame.height
+        if (frameW < 10 || frameH < 10) {
+            return Pair(
+                Pair(0.20f * screenWidth, 0.78f * screenHeight),
+                Pair(0.50f * screenWidth, 0.50f * screenHeight)
+            )
+        }
+
+        val safeActiveW = activeWidth.coerceIn(10, frameW)
+        val safeActiveH = activeHeight.coerceIn(10, frameH)
+        val requiredPixelCount = frameW * frameH
+        if (rawPixelsBuffer.size != requiredPixelCount) {
+            rawPixelsBuffer = IntArray(requiredPixelCount)
+        }
+        frame.getPixels(rawPixelsBuffer, 0, frameW, 0, 0, frameW, frameH)
+
+        val stepX = (safeActiveW / gridCols).coerceAtLeast(1)
+        val stepY = (safeActiveH / gridRows).coerceAtLeast(1)
+
+        var greenSumX = 0f
+        var greenSumY = 0f
+        var greenCount = 0
+
+        var joySumX = 0f
+        var joySumY = 0f
+        var joyCount = 0
+
+        for (gy in 0 until gridRows) {
+            val worldY = (gy.toFloat() / gridRows) * screenHeight
+            val sampleY = ((gy * stepY) + stepY / 2).coerceIn(0, safeActiveH - 1)
+            val rowOffset = sampleY * frameW
+
+            for (gx in 0 until gridCols) {
+                val worldX = (gx.toFloat() / gridCols) * screenWidth
+                val sampleX = ((gx * stepX) + stepX / 2).coerceIn(0, safeActiveW - 1)
+                val pixel = rawPixelsBuffer[rowOffset + sampleX]
+
+                val r = (pixel shr 16) and 0xFF
+                val g = (pixel shr 8) and 0xFF
+                val b = pixel and 0xFF
+
+                val maxC = if (r > g) (if (r > b) r else b) else (if (g > b) g else b)
+                val minC = if (r < g) (if (r < b) r else b) else (if (g < b) g else b)
+                val delta = maxC - minC
+                val v = maxC / 255f
+                val s = if (maxC == 0) 0f else delta.toFloat() / maxC
+                var h = 0f
+                if (delta > 0) {
+                    h = when (maxC) {
+                        r -> 60f * (((g - b).toFloat() / delta) % 6f)
+                        g -> 60f * (((b - r).toFloat() / delta) + 2f)
+                        else -> 60f * (((r - g).toFloat() / delta) + 4f)
+                    }
+                    if (h < 0f) h += 360f
+                }
+
+                // Green Player Indicator
+                if ((h in 80f..155f) && s >= 0.45f && v >= 0.40f) {
+                    if (worldX > screenWidth * 0.20f && worldX < screenWidth * 0.80f &&
+                        worldY > screenHeight * 0.20f && worldY < screenHeight * 0.80f) {
+                        greenSumX += worldX
+                        greenSumY += worldY
+                        greenCount++
+                    }
+                }
+
+                // Blue Joystick Base in lower-left quadrant
+                if (worldX < screenWidth * 0.42f && worldY > screenHeight * 0.50f) {
+                    if ((h in 190f..240f) && s in 0.25f..0.95f && v in 0.15f..0.95f) {
+                        joySumX += worldX
+                        joySumY += worldY
+                        joyCount++
+                    }
+                }
+            }
+        }
+
+        val autoJoyX = if (joyCount >= 2) (joySumX / joyCount) else (0.20f * screenWidth)
+        val autoJoyY = if (joyCount >= 2) (joySumY / joyCount) else (0.78f * screenHeight)
+
+        val autoPlayerX = if (greenCount >= 2) (greenSumX / greenCount) else (0.50f * screenWidth)
+        val autoPlayerY = if (greenCount >= 2) (greenSumY / greenCount) else (0.50f * screenHeight)
+
+        setManualJoystickCalibration(autoJoyX, autoJoyY)
+        setManualPlayerCalibration(autoPlayerX, autoPlayerY)
+
+        return Pair(Pair(autoJoyX, autoJoyY), Pair(autoPlayerX, autoPlayerY))
     }
 }

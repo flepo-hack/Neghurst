@@ -14,6 +14,14 @@ class RenderaPreferences(context: Context) {
     private val _currentProfile = MutableStateFlow(loadProfile())
     val currentProfile: StateFlow<DodgeProfile> = _currentProfile.asStateFlow()
 
+    private val _isDebugOverlayEnabled = MutableStateFlow(prefs.getBoolean("debug_overlay_enabled", true))
+    val isDebugOverlayEnabled: StateFlow<Boolean> = _isDebugOverlayEnabled.asStateFlow()
+
+    fun setDebugOverlayEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean("debug_overlay_enabled", enabled).apply()
+        _isDebugOverlayEnabled.value = enabled
+    }
+
     fun loadProfile(packageName: String = "default"): DodgeProfile {
         val prefix = if (packageName.isEmpty()) "default_" else "${packageName}_"
         return DodgeProfile(
