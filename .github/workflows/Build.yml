@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+# Pakollinen lupa, jotta Action saa luoda julkaisun (Release)
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,7 +33,7 @@ jobs:
             -storepass android -keypass android \
             -dname "CN=Release,O=App,C=FI"
 
-      - name: Luo väliaikainen google-services.json (Oikealla pakettinimellä)
+      - name: Luo väliaikainen google-services.json
         run: |
           echo '{
             "project_info": {"project_number": "123","project_id": "dummy"},
@@ -60,25 +64,22 @@ jobs:
             -Pandroid.injected.signing.key.password=android \
             --no-daemon --stacktrace
 
-      - name: Lataa APK suoraan linkiksi (Ei GitHubiin)
+      - name: Etsi ja nimeä valmis APK
         run: |
           APK_PATH=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
             echo "APK-tiedostoa ei löytynyt!"
             exit 1
           fi
-          
           mv "$APK_PATH" Rakenna_AP3K.apk
-          
-          echo "================================================================"
-          echo "✅ APK RAKENNETTU JA SIGNATTU ONNISTUNEESTI!"
-          echo "================================================================"
-          
-          echo "🔗 Latauslinkki 1 (BashUpload):"
-          curl -T Rakenna_AP3K.apk bashupload.com
-          echo ""
-          
-          echo "🔗 Latauslinkki 2 (Keep.sh):"
-          curl -T Rakenna_AP3K.apk https://free.keep.sh/Rakenna_AP3K.apk
-          echo ""
+
+      - name: Julkaise APK GitHub Releases -osioon
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: V.${{ github.run_number }}
+          name: AP3K Koontiversio #${{ github.run_number }}
+          body: "Automaattisesti rakennettu ja allekirjoitettu APK."
+          files: Rakenna_AP3K.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
