@@ -68,7 +68,7 @@ class RenderaPreferences(context: Context) {
     }
 
     fun isJoystickCalibrated(): Boolean {
-        return prefs.getBoolean("joystick_calibrated", false)
+        return prefs.getBoolean("joystick_calibrated", true)
     }
 
     fun resetJoystickCalibration() {

@@ -24,9 +24,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Warning
@@ -158,7 +158,7 @@ fun PermissionsScreen(
         PermissionItemCard(
             title = "3. Real-Time Screen Reader",
             description = "Transfers frame buffer to Rendera's high-speed threat detection engine (60 FPS optical motion & bullet detector).",
-            icon = Icons.Default.ScreenShare,
+            icon = Icons.AutoMirrored.Filled.ScreenShare,
             isGranted = hasMediaProjectionPermission,
             actionLabel = if (hasMediaProjectionPermission) "Capture Ready" else "Arm Screen Reader",
             onAction = {

@@ -16,4 +16,24 @@ data class DodgeProfile(
     val autoDodgeEnabled: Boolean = true,
     val soundHapticEnabled: Boolean = true,
     val aiDeepVisionEnabled: Boolean = true
-)
+) {
+    companion object {
+        fun brawlStars(): DodgeProfile = DodgeProfile(
+            packageName = "com.supercell.brawlstars",
+            profileName = "Brawl Stars",
+            joystickCenterX = 0.20f,
+            joystickCenterY = 0.78f,
+            joystickRadius = 150f,
+            playerCenterX = 0.50f,
+            playerCenterY = 0.50f,
+            threatRadius = 0.38f,
+            dodgeDurationMs = 150L,
+            dodgeDistanceFactor = 0.95f,
+            dodgeCooldownMs = 240L,
+            sensitivity = 0.85f,
+            autoDodgeEnabled = true,
+            soundHapticEnabled = true,
+            aiDeepVisionEnabled = true
+        )
+    }
+}
