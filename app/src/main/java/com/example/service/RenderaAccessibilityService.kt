@@ -78,7 +78,7 @@ class RenderaAccessibilityService : AccessibilityService() {
                 lineTo(endX, endY)
             }
 
-            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(50L, 500L))
+            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(15L, 500L))
             val gesture = GestureDescription.Builder()
                 .addStroke(stroke)
                 .build()

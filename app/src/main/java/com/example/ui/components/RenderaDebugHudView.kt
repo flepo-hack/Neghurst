@@ -115,6 +115,19 @@ class RenderaDebugHudView(context: Context) : View(context) {
         strokeWidth = 2f
     }
 
+    private val paintHealthBar = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00F0FF")
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+    }
+
+    private val paintHoughCircle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#EAB308") // Amber Gold
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f
+        pathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
+    }
+
     private val arrowPath = Path()
     private val textRect = RectF()
 
@@ -190,6 +203,28 @@ class RenderaDebugHudView(context: Context) : View(context) {
                 Color.WHITE
             )
         }
+
+        // 6. Draw Canny Edge Health Bars (4:1 Aspect Ratio)
+        for (bar in res.detectedHealthBars) {
+            val scaleX = w / 80f
+            val scaleY = height.toFloat() / 48f
+            val l = bar.left * scaleX
+            val t = bar.top * scaleY
+            val r = bar.right * scaleX
+            val b = bar.bottom * scaleY
+            paintHealthBar.color = if (bar.isPlayer) Color.parseColor("#05FFA1") else Color.parseColor("#FF2A55")
+            canvas.drawRect(l, t, r, b, paintHealthBar)
+        }
+
+        // 7. Draw Hough Circles (Brawl Ball & Selection Rings)
+        for (c in res.detectedCircles) {
+            val scaleX = w / 80f
+            val scaleY = height.toFloat() / 48f
+            val cx = c.centerX * scaleX
+            val cy = c.centerY * scaleY
+            val cr = c.radius * scaleX
+            canvas.drawCircle(cx, cy, cr, paintHoughCircle)
+        }
     }
 
     private fun drawTopHudBar(canvas: Canvas, screenW: Float, res: ScreenThreatDetector.FrameAnalysisResult?) {
@@ -197,11 +232,12 @@ class RenderaDebugHudView(context: Context) : View(context) {
         canvas.drawRect(0f, 0f, screenW, barHeight, paintHudBarBg)
         canvas.drawLine(0f, barHeight, screenW, barHeight, paintHudBorder)
 
-        // Left Status: FPS, Latency & Auto-Dodge
+        // Left Status: FPS, Latency, Camera Vector
         val fpsColor = if (fps >= 45) "#05FFA1" else if (fps >= 25) "#FFCC00" else "#FF3366"
         paintText.textSize = 24f
         paintText.color = Color.parseColor(fpsColor)
-        canvas.drawText("RENDERA RADAR  |  ${fps} FPS  |  ${latencyMs}ms", 24f, 40f, paintText)
+        val camInfo = if (res != null && res.isCameraMoving) "CAM:[${res.cameraDx},${res.cameraDy}]" else "CAM:STABLE"
+        canvas.drawText("RENDERA RADAR  |  ${fps} FPS  |  ${latencyMs}ms  |  $camInfo", 24f, 40f, paintText)
 
         // Middle: Game Threat Status
         val threat = res?.threat
