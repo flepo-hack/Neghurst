@@ -328,7 +328,14 @@ class MainActivity : ComponentActivity() {
                                 if (isRunning) {
                                     stopOverlayService()
                                 } else {
-                                    showGameSelectDialog = true
+                                    val brawlStars = installedApps.firstOrNull {
+                                        it.packageName == "com.supercell.brawlstars" || it.appName.contains("Brawl", ignoreCase = true)
+                                    }
+                                    if (brawlStars != null) {
+                                        launchTargetGame(brawlStars, hasOverlay, hasAccessibility)
+                                    } else {
+                                        showGameSelectDialog = true
+                                    }
                                 }
                             },
                             modifier = Modifier

@@ -18,9 +18,9 @@ import kotlin.math.sin
 class HoughCircleDetector(
     private val width: Int,
     private val height: Int,
-    private val minRadius: Int = 12,
-    private val maxRadius: Int = 36,
-    private val radiusStep: Int = 3
+    private val minRadius: Int = 4,
+    private val maxRadius: Int = 18,
+    private val radiusStep: Int = 1
 ) {
     data class Circle(
         var centerX: Float = 0f,

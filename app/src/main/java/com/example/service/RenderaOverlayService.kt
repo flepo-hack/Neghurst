@@ -40,7 +40,6 @@ import com.example.model.DodgeProfile
 import com.example.model.ThreatLevel
 import com.example.model.ThreatVector
 import com.example.ui.components.RenderaDebugHudView
-import com.example.vision.GeminiTacticalAdvisor
 import com.example.vision.ScreenThreatDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,7 +79,6 @@ class RenderaOverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: RenderaPreferences
     private lateinit var threatDetector: ScreenThreatDetector
-    private val geminiAdvisor = GeminiTacticalAdvisor()
 
     private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
@@ -451,15 +449,8 @@ class RenderaOverlayService : Service() {
                 MotionEvent.ACTION_UP -> {
                     mainHandler.removeCallbacks(longPressRunnable)
                     if (!isDrag && !isLongPressed) {
-                        val currentProf = prefs.currentProfile.value
-                        val newEnabled = !currentProf.autoDodgeEnabled
-                        prefs.toggleAutoDodge(newEnabled)
                         triggerHapticFeedback(40L)
-                        if (newEnabled) {
-                            updateBubbleUi(BubbleState.READY)
-                        } else {
-                            updateBubbleUi(BubbleState.PAUSED)
-                        }
+                        toggleMiniMenu(params.x, params.y)
                     }
                     true
                 }
@@ -513,7 +504,7 @@ class RenderaOverlayService : Service() {
             background = bg
 
             addView(TextView(this@RenderaOverlayService).apply {
-                text = "⚡ RENDERA REAL-TIME RADAR"
+                text = "RENDERA REAL-TIME RADAR"
                 setTextColor(android.graphics.Color.argb(255, 157, 78, 221))
                 textSize = 14f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -558,7 +549,7 @@ class RenderaOverlayService : Service() {
 
             // Calibration & Custom Position Overlay
             val calibBtn = TextView(this@RenderaOverlayService).apply {
-                text = "🎯 Calibrate Joystick & Player"
+                text = "CALIBRATE JOYSTICK & PLAYER"
                 setTextColor(android.graphics.Color.argb(255, 0, 240, 255))
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -584,7 +575,7 @@ class RenderaOverlayService : Service() {
             // Radar Debug HUD Toggle Button
             val isHudOn = prefs.isDebugOverlayEnabled.value
             val hudToggleBtn = TextView(this@RenderaOverlayService).apply {
-                text = if (isHudOn) "🔍 Radar Debug HUD: [PÄÄLLÄ]" else "🔍 Radar Debug HUD: [POIS]"
+                text = if (isHudOn) "RADAR DEBUG HUD: [PÄÄLLÄ]" else "RADAR DEBUG HUD: [POIS]"
                 setTextColor(if (isHudOn) android.graphics.Color.argb(255, 5, 255, 161) else android.graphics.Color.argb(255, 200, 210, 225))
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -608,17 +599,17 @@ class RenderaOverlayService : Service() {
             }
             addView(hudToggleBtn)
 
-            // AI Tactical Advisor Button
-            val aiBtn = TextView(this@RenderaOverlayService).apply {
-                text = "✨ Gemini Tactical Analysis"
-                setTextColor(android.graphics.Color.argb(255, 255, 183, 3))
+            // Fast Auto-Detect Button (Brawl Stars)
+            val autoDetectBtn = TextView(this@RenderaOverlayService).apply {
+                text = "SMART AUTO-DETECT (BRAWL STARS)"
+                setTextColor(android.graphics.Color.argb(255, 255, 215, 0))
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
                 gravity = Gravity.CENTER
                 val btnBg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(140, 50, 40, 15))
+                    setColor(android.graphics.Color.argb(170, 42, 32, 12))
                     cornerRadius = 12 * resources.displayMetrics.density
-                    setStroke(1, android.graphics.Color.argb(180, 255, 183, 3))
+                    setStroke(1, android.graphics.Color.argb(230, 255, 215, 0))
                 }
                 background = btnBg
                 val p = (10 * resources.displayMetrics.density).toInt()
@@ -628,14 +619,14 @@ class RenderaOverlayService : Service() {
                 layoutParams = lp
                 setOnClickListener {
                     removeHudMenu()
-                    triggerGeminiAiScan()
+                    runQuickAutoDetect()
                 }
             }
-            addView(aiBtn)
+            addView(autoDetectBtn)
 
             // Stop Rendera Button
             val stopBtn = TextView(this@RenderaOverlayService).apply {
-                text = "🛑 Stop Rendera"
+                text = "STOP RENDERA"
                 setTextColor(android.graphics.Color.WHITE)
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -659,7 +650,7 @@ class RenderaOverlayService : Service() {
 
             // Close Menu Button
             val closeBtn = TextView(this@RenderaOverlayService).apply {
-                text = "✕ Close"
+                text = "CLOSE"
                 setTextColor(android.graphics.Color.argb(200, 160, 170, 190))
                 textSize = 11f
                 gravity = Gravity.CENTER
@@ -786,7 +777,7 @@ class RenderaOverlayService : Service() {
             layoutParams = lp
 
             addView(TextView(this@RenderaOverlayService).apply {
-                text = "🎯 TARGET CALIBRATION & ANCHORS"
+                text = "TARGET CALIBRATION & ANCHORS"
                 setTextColor(android.graphics.Color.argb(255, 0, 240, 255))
                 textSize = 15f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -810,7 +801,7 @@ class RenderaOverlayService : Service() {
             }
 
             val joyTabBtn = TextView(this@RenderaOverlayService).apply {
-                text = "🕹️ Edit Joystick"
+                text = "Edit Joystick"
                 setTextColor(android.graphics.Color.BLACK)
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -824,7 +815,7 @@ class RenderaOverlayService : Service() {
             }
 
             val playerTabBtn = TextView(this@RenderaOverlayService).apply {
-                text = "👤 Edit Player Center"
+                text = "Edit Player Center"
                 setTextColor(android.graphics.Color.WHITE)
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -845,7 +836,7 @@ class RenderaOverlayService : Service() {
             addView(switchRow)
 
             val autoDetectBtn = TextView(this@RenderaOverlayService).apply {
-                text = "✨ SMART AUTO-DETECT (Tunnista peli ruudulta)"
+                text = "SMART AUTO-DETECT (Tunnista peli ruudulta)"
                 setTextColor(android.graphics.Color.argb(255, 255, 215, 0))
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -888,7 +879,7 @@ class RenderaOverlayService : Service() {
                     playerRingParams.topMargin = (currentPlayerY - playerRadiusPx).toInt().coerceIn(0, screenHeight - playerDiameterPx)
                     playerRing.layoutParams = playerRingParams
 
-                    subLabel.text = "✨ Automaattisesti kalibroitu Brawl Starsille! Voit edelleen säätää koskettamalla."
+                    subLabel.text = "Automaattisesti kalibroitu Brawl Starsille. Voit edelleen säätää koskettamalla."
                     triggerHapticFeedback(50L)
                 }
             }
@@ -941,7 +932,7 @@ class RenderaOverlayService : Service() {
 
         // Save Button
         val saveBtn = TextView(this).apply {
-            text = "✓ LOCK & ACTIVATE (READY)"
+            text = "LOCK & ACTIVATE (READY)"
             setTextColor(android.graphics.Color.BLACK)
             textSize = 14f
             setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -992,27 +983,31 @@ class RenderaOverlayService : Service() {
         }
     }
 
-    private fun triggerGeminiAiScan() {
+    private fun runQuickAutoDetect() {
         val latestBitmap = acquireCurrentFrameBitmap()
-        if (latestBitmap == null) {
-            _stats.value = _stats.value.copy(
-                latestTacticalAdvice = "AI Vision: Waiting for screen frame buffer..."
-            )
-            return
-        }
-
-        _stats.value = _stats.value.copy(
-            latestTacticalAdvice = "✨ Gemini analyzing Brawl Stars battlefield..."
+        val (joy, player) = threatDetector.autoCalibrateFromFrame(
+            frame = latestBitmap ?: Bitmap.createBitmap(screenWidth.coerceAtLeast(10), screenHeight.coerceAtLeast(10), Bitmap.Config.ARGB_8888),
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            activeWidth = activeCaptureWidth,
+            activeHeight = activeCaptureHeight
         )
+        val normJoyX = (joy.first / screenWidth.toFloat()).coerceIn(0.05f, 0.95f)
+        val normJoyY = (joy.second / screenHeight.toFloat()).coerceIn(0.05f, 0.95f)
+        val normPlayerX = (player.first / screenWidth.toFloat()).coerceIn(0.05f, 0.95f)
+        val normPlayerY = (player.second / screenHeight.toFloat()).coerceIn(0.05f, 0.95f)
 
-        serviceScope.launch(Dispatchers.IO) {
-            val advice = geminiAdvisor.analyzeGameScene(latestBitmap, activeGame)
-            withContext(Dispatchers.Main) {
-                _stats.value = _stats.value.copy(
-                    latestTacticalAdvice = advice
-                )
-            }
-        }
+        prefs.updateJoystickCalibration(normJoyX, normJoyY, 140f)
+        prefs.updatePlayerCalibration(normPlayerX, normPlayerY)
+        threatDetector.setManualJoystickCalibration(joy.first, joy.second)
+        threatDetector.setManualPlayerCalibration(player.first, player.second)
+
+        triggerHapticFeedback(70L)
+        android.widget.Toast.makeText(
+            this@RenderaOverlayService,
+            "Calibrated for Brawl Stars: Joystick (${joy.first.toInt()}, ${joy.second.toInt()}), Player (${player.first.toInt()}, ${player.second.toInt()})",
+            android.widget.Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun startDetectionLoop() {
@@ -1060,9 +1055,9 @@ class RenderaOverlayService : Service() {
                                 lastFpsTimestamp = now
 
                                 val statusAdvice = if (result.isPlayerGreenRingTracked) {
-                                    "🎯 Green Ring Locked @ (${result.playerX.toInt()}, ${result.playerY.toInt()}) | Joy: (${result.joystickX.toInt()}, ${result.joystickY.toInt()}) | Enemies: ${result.enemyCount}"
+                                    "[LOCKED] Player @ (${result.playerX.toInt()}, ${result.playerY.toInt()}) | Joy: (${result.joystickX.toInt()}, ${result.joystickY.toInt()}) | Enemies: ${result.enemyCount}"
                                 } else {
-                                    "👀 Searching for Green Ring | Joy: (${result.joystickX.toInt()}, ${result.joystickY.toInt()})"
+                                    "[SEARCHING] Scanning for Player | Joy: (${result.joystickX.toInt()}, ${result.joystickY.toInt()})"
                                 }
 
                                 _stats.value = _stats.value.copy(
@@ -1075,7 +1070,7 @@ class RenderaOverlayService : Service() {
                                     isJoystickCalibrated = result.isJoystickTracked,
                                     isPlayerCalibrated = result.isPlayerGreenRingTracked,
                                     activeGamePackage = activeGame,
-                                    latestTacticalAdvice = if (_stats.value.latestTacticalAdvice.startsWith("✨")) _stats.value.latestTacticalAdvice else statusAdvice
+                                    latestTacticalAdvice = statusAdvice
                                 )
                             }
                         }

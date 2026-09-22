@@ -45,10 +45,10 @@ class DeterministicFrameBuffer(
             System.arraycopy(grayscaleBuffer, 0, prevGrayscaleBuffer, 0, totalPixels)
         }
 
-        val bmpW = bitmap.width
-        val bmpH = bitmap.height
+        val effW = activeWidth.coerceIn(1, bitmap.width)
+        val effH = activeHeight.coerceIn(1, bitmap.height)
 
-        if (bmpW == width && bmpH == height) {
+        if (effW == width && effH == height && bitmap.width == width) {
             bitmap.getPixels(rawIntPixels, 0, width, 0, 0, width, height)
             for (i in 0 until totalPixels) {
                 val pixel = rawIntPixels[i]
@@ -60,22 +60,21 @@ class DeterministicFrameBuffer(
                 grayscaleBuffer[i] = y.toByte()
             }
         } else {
-            // Downsample or stretch directly into the fixed resolution
-            val stepX = (bmpW.toFloat() / width)
-            val stepY = (bmpH.toFloat() / height)
+            // Downsample or stretch directly into the fixed resolution, strictly within active area
+            val stepX = (effW.toFloat() / width)
+            val stepY = (effH.toFloat() / height)
 
-            val safeW = bmpW.coerceAtLeast(1)
-            if (reusableRow.size < safeW) {
-                reusableRow = IntArray(safeW)
+            if (reusableRow.size < effW) {
+                reusableRow = IntArray(effW)
             }
 
             for (y in 0 until height) {
-                val srcY = ((y * stepY).toInt()).coerceIn(0, bmpH - 1)
-                bitmap.getPixels(reusableRow, 0, safeW, 0, srcY, safeW, 1)
+                val srcY = ((y * stepY).toInt()).coerceIn(0, effH - 1)
+                bitmap.getPixels(reusableRow, 0, effW, 0, srcY, effW, 1)
                 val rowOffset = y * width
 
                 for (x in 0 until width) {
-                    val srcX = ((x * stepX).toInt()).coerceIn(0, safeW - 1)
+                    val srcX = ((x * stepX).toInt()).coerceIn(0, effW - 1)
                     val pixel = reusableRow[srcX]
                     downsampledPixels[rowOffset + x] = pixel
                     val r = (pixel shr 16) and 0xFF

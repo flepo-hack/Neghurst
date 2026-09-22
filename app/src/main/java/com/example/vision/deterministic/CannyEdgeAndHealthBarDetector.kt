@@ -210,11 +210,11 @@ class CannyEdgeAndHealthBarDetector(
         detectedBarCount = 0
         playerBar = null
 
-        // Brawl Stars health bars: aspect ratio width / height in [2.8 .. 5.2]
-        val minBarW = (width * 0.08f).toInt().coerceAtLeast(6)
-        val maxBarW = (width * 0.50f).toInt().coerceAtLeast(16)
-        val minBarH = (height * 0.04f).toInt().coerceAtLeast(2)
-        val maxBarH = (height * 0.25f).toInt().coerceAtLeast(6)
+        // Brawl Stars health bars: aspect ratio width / height in [2.0 .. 6.5]
+        val minBarW = (width * 0.04f).toInt().coerceAtLeast(4)
+        val maxBarW = (width * 0.40f).toInt().coerceAtLeast(14)
+        val minBarH = (height * 0.015f).toInt().coerceAtLeast(1)
+        val maxBarH = (height * 0.15f).toInt().coerceAtLeast(4)
 
         for (y in (height * 0.08f).toInt() until (height * 0.90f).toInt()) {
             var inBarEdge = false
@@ -262,7 +262,7 @@ class CannyEdgeAndHealthBarDetector(
 
                         if (foundBottom && detectedBarCount < maxBars) {
                             val ratio = spanW.toFloat() / bestH.toFloat()
-                            if (ratio in 2.8f..5.5f) { // Distinct ~4:1 ratio
+                            if (ratio in 2.0f..6.5f) { // Distinct ~4:1 ratio (allows segmented sections)
                                 val bar = detectedBars[detectedBarCount]
                                 bar.left = edgeStartX
                                 bar.top = y

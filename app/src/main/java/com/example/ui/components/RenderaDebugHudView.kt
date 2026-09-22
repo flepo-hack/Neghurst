@@ -62,7 +62,7 @@ class RenderaDebugHudView(context: Context) : View(context) {
     private val paintEnemy = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#FF2A55") // High-Threat Crimson Red
         style = Paint.Style.STROKE
-        strokeWidth = 4f
+        strokeWidth = 4.5f
     }
 
     private val paintEnemyFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -88,15 +88,36 @@ class RenderaDebugHudView(context: Context) : View(context) {
         pathEffect = DashPathEffect(floatArrayOf(16f, 12f), 0f)
     }
 
+    private val paintEnemyLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#55FF2A55")
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        pathEffect = DashPathEffect(floatArrayOf(10f, 10f), 0f)
+    }
+
     private val paintTextBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#DD0B0F19")
+        color = Color.parseColor("#EE0B0F19")
         style = Paint.Style.FILL
     }
 
     private val paintText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textSize = 28f
+        textSize = 26f
         isFakeBoldText = true
+    }
+
+    private val paintBannerTitle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00F0FF")
+        textSize = 34f
+        isFakeBoldText = true
+        textAlign = Paint.Align.CENTER
+    }
+
+    private val paintBannerSub = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#E0AAFF")
+        textSize = 24f
+        isFakeBoldText = true
+        textAlign = Paint.Align.CENTER
     }
 
     private val paintSubText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -121,15 +142,9 @@ class RenderaDebugHudView(context: Context) : View(context) {
         strokeWidth = 3f
     }
 
-    private val paintHoughCircle = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#EAB308") // Amber Gold
-        style = Paint.Style.STROKE
-        strokeWidth = 2.5f
-        pathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
-    }
-
     private val arrowPath = Path()
     private val textRect = RectF()
+    private val bannerRect = RectF()
 
     init {
         // Force hardware acceleration for smooth 60fps overlay
@@ -155,76 +170,85 @@ class RenderaDebugHudView(context: Context) : View(context) {
         super.onDraw(canvas)
 
         val w = width.toFloat()
+        val h = height.toFloat()
         val res = analysisResult
 
         // 1. Draw Tactical Top HUD Bar
         drawTopHudBar(canvas, w, res)
 
-        if (res == null) return
+        // Fallback default coordinates if res is null
+        val playerX = res?.playerX ?: (w * 0.50f)
+        val playerY = res?.playerY ?: (h * 0.52f)
+        val joyX = res?.joystickX ?: (w * 0.20f)
+        val joyY = res?.joystickY ?: (h * 0.76f)
 
-        // 2. Draw Entities (Enemies, Projectiles, Obstacles)
-        for (entity in res.debugEntities) {
-            when (entity.type) {
-                EntityType.PLAYER -> {
-                    // Handled specially below for enhanced reticle
-                }
-                EntityType.JOYSTICK -> {
-                    // Handled specially below for joystick anchor & vector
-                }
-                EntityType.ENEMY -> {
-                    drawEnemyEntity(canvas, entity, res.playerX, res.playerY)
-                }
-                EntityType.PROJECTILE -> {
-                    drawProjectileEntity(canvas, entity, res.playerX, res.playerY)
-                }
-                EntityType.OBSTACLE -> {
-                    drawObstacleEntity(canvas, entity)
+        // 2. Draw Player Reticle & Lock Status (Always visible so user sees calibration)
+        drawPlayerReticle(canvas, playerX, playerY, res?.isPlayerGreenRingTracked ?: false)
+
+        // 3. Draw Joystick Anchor (Always visible so user sees calibration)
+        drawJoystickAnchor(canvas, joyX, joyY)
+
+        // 4. If Waiting for Match (no enemies and no threats)
+        val isWaiting = res == null || (res.enemyCount == 0 && res.threat == null)
+        if (isWaiting) {
+            drawWaitingBanner(canvas, w, h)
+            return
+        }
+
+        // 5. Draw Enemies & Projectiles from detection
+        if (res != null) {
+            for (entity in res.debugEntities) {
+                when (entity.type) {
+                    EntityType.ENEMY -> {
+                        drawEnemyEntity(canvas, entity, res.playerX, res.playerY)
+                    }
+                    EntityType.PROJECTILE -> {
+                        drawProjectileEntity(canvas, entity, res.playerX, res.playerY)
+                    }
+                    else -> {}
                 }
             }
+
+            // 6. Draw Active Threat Trajectory Line to Player
+            res.threat?.let { threat ->
+                canvas.drawLine(threat.threatX, threat.threatY, res.playerX, res.playerY, paintTrajectoryLine)
+                val midX = (threat.threatX + res.playerX) / 2f
+                val midY = (threat.threatY + res.playerY) / 2f
+                drawFloatingBadge(
+                    canvas,
+                    midX,
+                    midY,
+                    "IMPACT IN ${threat.timeToImpactMs}ms",
+                    Color.parseColor("#FF2A55"),
+                    Color.WHITE
+                )
+            }
+
+            // 7. Dynamic Evasion Vector from Joystick Anchor
+            val angleDeg = res.dodgeAngleDeg ?: res.threat?.dodgeAngleDeg
+            if (angleDeg != null) {
+                drawEvasionVector(canvas, res.joystickX, res.joystickY, angleDeg)
+            }
         }
+    }
 
-        // 3. Draw Player Reticle & Lock Status
-        drawPlayerReticle(canvas, res)
+    private fun drawWaitingBanner(canvas: Canvas, screenW: Float, screenH: Float) {
+        val bannerW = 600f.coerceAtMost(screenW * 0.85f)
+        val bannerH = 120f
+        val left = (screenW - bannerW) / 2f
+        val top = screenH * 0.22f
+        bannerRect.set(left, top, left + bannerW, top + bannerH)
 
-        // 4. Draw Joystick Anchor and Dynamic Evasion Vector
-        drawJoystickAnchorAndVector(canvas, res)
+        paintTextBg.color = Color.parseColor("#EE0B0F19")
+        canvas.drawRoundRect(bannerRect, 16f, 16f, paintTextBg)
 
-        // 5. Draw Active Threat Trajectory Line to Player
-        res.threat?.let { threat ->
-            canvas.drawLine(threat.threatX, threat.threatY, res.playerX, res.playerY, paintTrajectoryLine)
-            val midX = (threat.threatX + res.playerX) / 2f
-            val midY = (threat.threatY + res.playerY) / 2f
-            drawFloatingBadge(
-                canvas,
-                midX,
-                midY,
-                "⚠️ IMPACT IN ${threat.timeToImpactMs}ms",
-                Color.parseColor("#FF2A55"),
-                Color.WHITE
-            )
-        }
+        paintHudBorder.color = Color.parseColor("#00F0FF")
+        paintHudBorder.strokeWidth = 2.5f
+        canvas.drawRoundRect(bannerRect, 16f, 16f, paintHudBorder)
 
-        // 6. Draw Canny Edge Health Bars (4:1 Aspect Ratio)
-        for (bar in res.detectedHealthBars) {
-            val scaleX = w / 80f
-            val scaleY = height.toFloat() / 48f
-            val l = bar.left * scaleX
-            val t = bar.top * scaleY
-            val r = bar.right * scaleX
-            val b = bar.bottom * scaleY
-            paintHealthBar.color = if (bar.isPlayer) Color.parseColor("#05FFA1") else Color.parseColor("#FF2A55")
-            canvas.drawRect(l, t, r, b, paintHealthBar)
-        }
-
-        // 7. Draw Hough Circles (Brawl Ball & Selection Rings)
-        for (c in res.detectedCircles) {
-            val scaleX = w / 80f
-            val scaleY = height.toFloat() / 48f
-            val cx = c.centerX * scaleX
-            val cy = c.centerY * scaleY
-            val cr = c.radius * scaleX
-            canvas.drawCircle(cx, cy, cr, paintHoughCircle)
-        }
+        val centerX = screenW / 2f
+        canvas.drawText("STATUS: WAITING FOR MATCH", centerX, top + 48f, paintBannerTitle)
+        canvas.drawText("CLICK BUBBLE TO CALIBRATE (IN MATCH)", centerX, top + 92f, paintBannerSub)
     }
 
     private fun drawTopHudBar(canvas: Canvas, screenW: Float, res: ScreenThreatDetector.FrameAnalysisResult?) {
@@ -234,18 +258,18 @@ class RenderaDebugHudView(context: Context) : View(context) {
 
         // Left Status: FPS, Latency, Camera Vector
         val fpsColor = if (fps >= 45) "#05FFA1" else if (fps >= 25) "#FFCC00" else "#FF3366"
-        paintText.textSize = 24f
+        paintText.textSize = 22f
         paintText.color = Color.parseColor(fpsColor)
         val camInfo = if (res != null && res.isCameraMoving) "CAM:[${res.cameraDx},${res.cameraDy}]" else "CAM:STABLE"
-        canvas.drawText("RENDERA RADAR  |  ${fps} FPS  |  ${latencyMs}ms  |  $camInfo", 24f, 40f, paintText)
+        canvas.drawText("RENDERA RADAR  |  ${fps} FPS  |  ${latencyMs}ms  |  $camInfo", 20f, 40f, paintText)
 
         // Middle: Game Threat Status
         val threat = res?.threat
         val threatStatusText = when {
-            threat != null -> "🚨 DANGER: ${threat.threatLevel} (${threat.speed.toInt()} px/s)"
-            res != null && res.enemyCount > 0 -> "🎯 TRACKING (${res.enemyCount} ENEMIES)"
-            res != null -> "🛡️ SCANNING (SAFE)"
-            else -> "⏳ CALIBRATING"
+            threat != null -> "DANGER: ${threat.threatLevel} (${threat.speed.toInt()} px/s)"
+            res != null && res.enemyCount > 0 -> "COMBAT: TRACKING (${res.enemyCount} ENEMIES)"
+            res != null -> "STATUS: SCANNING (SAFE)"
+            else -> "STATUS: WAITING"
         }
         val threatColor = when {
             threat != null -> "#FF2A55"
@@ -253,25 +277,23 @@ class RenderaDebugHudView(context: Context) : View(context) {
             else -> "#05FFA1"
         }
         paintText.color = Color.parseColor(threatColor)
-        val middleX = (screenW / 2f) - 140f
+        val middleX = (screenW / 2f) - 150f
         canvas.drawText(threatStatusText, middleX, 40f, paintText)
 
         // Right Status: Accessibility and Auto-Dodge Mode
-        val accText = if (isAccessibilityActive) "ACC: OK" else "⚠️ ACC: OFF"
+        val accText = if (isAccessibilityActive) "ACC: OK" else "ACC: OFF"
         val accColor = if (isAccessibilityActive) "#05FFA1" else "#FF2A55"
         paintText.color = Color.parseColor(accColor)
-        val rightX = screenW - 320f
+        val rightX = screenW - 300f
         canvas.drawText(accText, rightX, 40f, paintText)
 
         val modeText = if (isAutoDodgeEnabled) "AUTO-DODGE" else "MONITOR"
         paintSubText.textSize = 20f
         paintSubText.color = if (isAutoDodgeEnabled) Color.parseColor("#05FFA1") else Color.LTGRAY
-        canvas.drawText(modeText, rightX + 160f, 40f, paintSubText)
+        canvas.drawText(modeText, rightX + 130f, 40f, paintSubText)
     }
 
-    private fun drawPlayerReticle(canvas: Canvas, res: ScreenThreatDetector.FrameAnalysisResult) {
-        val px = res.playerX
-        val py = res.playerY
+    private fun drawPlayerReticle(canvas: Canvas, px: Float, py: Float, isLocked: Boolean) {
         val radius = 56f
 
         // Foot indicator circle
@@ -283,13 +305,11 @@ class RenderaDebugHudView(context: Context) : View(context) {
         canvas.drawLine(px, py - radius - 16f, px, py + radius + 16f, paintPlayer)
 
         // Label above player
-        val lockLabel = if (res.isPlayerGreenRingTracked) "👤 MINÄ [LOCKED]" else "👤 MINÄ [CALIB]"
+        val lockLabel = if (isLocked) "PLAYER [LOCKED]" else "PLAYER [CALIB]"
         drawFloatingBadge(canvas, px, py - radius - 24f, lockLabel, Color.parseColor("#05FFA1"), Color.BLACK)
     }
 
-    private fun drawJoystickAnchorAndVector(canvas: Canvas, res: ScreenThreatDetector.FrameAnalysisResult) {
-        val jx = res.joystickX
-        val jy = res.joystickY
+    private fun drawJoystickAnchor(canvas: Canvas, jx: Float, jy: Float) {
         val joyRadius = 140f
 
         // Joystick base ring
@@ -297,37 +317,39 @@ class RenderaDebugHudView(context: Context) : View(context) {
         canvas.drawCircle(jx, jy, 16f, paintJoyCenter)
 
         // Label
-        drawFloatingBadge(canvas, jx, jy + joyRadius + 28f, "🕹️ JOYSTICK ANCHOR", Color.parseColor("#00F0FF"), Color.BLACK)
+        drawFloatingBadge(canvas, jx, jy + joyRadius + 28f, "JOYSTICK ANCHOR", Color.parseColor("#00F0FF"), Color.BLACK)
+    }
 
-        // Dynamic Evasion Vector (if threat or dodge angle is computed)
-        val angleDeg = res.dodgeAngleDeg ?: res.threat?.dodgeAngleDeg
-        if (angleDeg != null) {
-            val angleRad = Math.toRadians(angleDeg.toDouble())
-            val vectorLength = joyRadius * 0.95f
-            val endX = jx + (vectorLength * cos(angleRad)).toFloat()
-            val endY = jy + (vectorLength * sin(angleRad)).toFloat()
+    private fun drawEvasionVector(canvas: Canvas, jx: Float, jy: Float, angleDeg: Float) {
+        val joyRadius = 140f
+        val angleRad = Math.toRadians(angleDeg.toDouble())
+        val vectorLength = joyRadius * 0.95f
+        val endX = jx + (vectorLength * cos(angleRad)).toFloat()
+        val endY = jy + (vectorLength * sin(angleRad)).toFloat()
 
-            // Draw thick glowing evasion vector
-            canvas.drawLine(jx, jy, endX, endY, paintDodgeVector)
+        // Draw thick glowing evasion vector
+        canvas.drawLine(jx, jy, endX, endY, paintDodgeVector)
 
-            // Draw Arrowhead
-            drawArrowHead(canvas, jx, jy, endX, endY, paintDodgeVector)
+        // Draw Arrowhead
+        drawArrowHead(canvas, jx, jy, endX, endY, paintDodgeVector)
 
-            // Draw Badge
-            drawFloatingBadge(
-                canvas,
-                endX,
-                endY - 20f,
-                "⚡ DODGE ${angleDeg.toInt()}°",
-                Color.parseColor("#D946EF"),
-                Color.WHITE
-            )
-        }
+        // Draw Badge
+        drawFloatingBadge(
+            canvas,
+            endX,
+            endY - 20f,
+            "DODGE ${angleDeg.toInt()}°",
+            Color.parseColor("#D946EF"),
+            Color.WHITE
+        )
     }
 
     private fun drawEnemyEntity(canvas: Canvas, entity: com.example.model.DetectedEntity, playerX: Float, playerY: Float) {
         canvas.drawCircle(entity.x, entity.y, entity.radius, paintEnemyFill)
         canvas.drawCircle(entity.x, entity.y, entity.radius, paintEnemy)
+
+        // Line to player
+        canvas.drawLine(playerX, playerY, entity.x, entity.y, paintEnemyLine)
 
         val dist = hypot(entity.x - playerX, entity.y - playerY).toInt()
         val label = "${entity.label} (${dist}px)"
@@ -351,12 +373,6 @@ class RenderaDebugHudView(context: Context) : View(context) {
         drawFloatingBadge(canvas, entity.x, entity.y - entity.radius - 16f, entity.label, Color.parseColor("#FF9900"), Color.BLACK)
     }
 
-    private fun drawObstacleEntity(canvas: Canvas, entity: com.example.model.DetectedEntity) {
-        paintJoy.color = Color.parseColor("#888888")
-        canvas.drawCircle(entity.x, entity.y, entity.radius, paintJoy)
-        paintJoy.color = Color.parseColor("#00F0FF")
-    }
-
     private fun drawFloatingBadge(canvas: Canvas, centerX: Float, centerY: Float, text: String, badgeColor: Int, textColor: Int) {
         paintText.textSize = 22f
         val textWidth = paintText.measureText(text)
@@ -370,7 +386,7 @@ class RenderaDebugHudView(context: Context) : View(context) {
             centerY + 10f + padY
         )
 
-        paintTextBg.color = Color.parseColor("#E6090D16")
+        paintTextBg.color = Color.parseColor("#EE0B0F19")
         canvas.drawRoundRect(textRect, 8f, 8f, paintTextBg)
 
         paintHudBorder.color = badgeColor

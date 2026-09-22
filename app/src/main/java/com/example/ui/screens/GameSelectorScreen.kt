@@ -163,7 +163,7 @@ fun GameSelectorScreen(
             FilterChip(
                 selected = onlyGamesFilter,
                 onClick = { onlyGamesFilter = true },
-                label = { Text("🎮 Games Detected ($gamesCount)", fontSize = 11.sp) },
+                label = { Text("Games Detected ($gamesCount)", fontSize = 11.sp) },
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = NeonCyan.copy(alpha = 0.2f),
                     selectedLabelColor = NeonCyan
