@@ -201,9 +201,9 @@ class ScreenThreatDetector {
         // =========================================================================
         val isLandscape = screenWidth > screenHeight
         val defaultJoyX = if (manualJoyX > 0f) manualJoyX else (if (isLandscape) 0.20f * screenWidth else 0.25f * screenWidth)
-        val defaultJoyY = if (manualJoyY > 0f) manualJoyY else (if (isLandscape) 0.76f * screenHeight else 0.80f * screenHeight)
+        val defaultJoyY = if (manualJoyY > 0f) manualJoyY else (if (isLandscape) 0.78f * screenHeight else 0.80f * screenHeight)
         val defaultPlayerX = if (manualPlayerX > 0f) manualPlayerX else (0.50f * screenWidth)
-        val defaultPlayerY = if (manualPlayerY > 0f) manualPlayerY else (if (isLandscape) 0.52f * screenHeight else 0.50f * screenHeight)
+        val defaultPlayerY = if (manualPlayerY > 0f) manualPlayerY else (0.50f * screenHeight)
 
         val downsampledPixels = frameBuffer.downsampledPixels
         var detectedPlayerX = -1f
@@ -566,9 +566,9 @@ class ScreenThreatDetector {
         val isLandscape = screenWidth > screenHeight
 
         val autoJoyX = if (isLandscape) 0.20f * screenWidth else 0.25f * screenWidth
-        val autoJoyY = if (isLandscape) 0.76f * screenHeight else 0.80f * screenHeight
+        val autoJoyY = if (isLandscape) 0.78f * screenHeight else 0.80f * screenHeight
         var autoPlayerX = 0.50f * screenWidth
-        var autoPlayerY = if (isLandscape) 0.52f * screenHeight else 0.50f * screenHeight
+        var autoPlayerY = 0.50f * screenHeight
 
         if (frameW >= 10 && frameH >= 10) {
             val safeActiveW = activeWidth.coerceIn(10, frameW)
@@ -605,6 +605,14 @@ class ScreenThreatDetector {
             if (greenCount in 3..250) {
                 autoPlayerX = ((greenSumX / greenCount) / gridCols.toFloat()) * screenWidth
                 autoPlayerY = ((greenSumY / greenCount) / gridRows.toFloat()) * screenHeight
+            } else {
+                // Fallback to Canny edge health bar detection near playfield center
+                cannyDetector.processFrame(frameBuffer.grayscaleBuffer, gridCols / 2f, gridRows / 2f)
+                val pBar = cannyDetector.playerBar
+                if (pBar != null) {
+                    autoPlayerX = (pBar.centerX / gridCols.toFloat()) * screenWidth
+                    autoPlayerY = (pBar.centerY / gridRows.toFloat()) * screenHeight + (screenHeight * 0.045f)
+                }
             }
         }
 

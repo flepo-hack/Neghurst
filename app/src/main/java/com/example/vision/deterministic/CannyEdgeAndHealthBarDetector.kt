@@ -210,11 +210,11 @@ class CannyEdgeAndHealthBarDetector(
         detectedBarCount = 0
         playerBar = null
 
-        // Brawl Stars health bars: aspect ratio width / height in [2.0 .. 6.5]
+        // Health bars: aspect ratio width / height in [2.0 .. 6.5]
         val minBarW = (width * 0.04f).toInt().coerceAtLeast(4)
-        val maxBarW = (width * 0.40f).toInt().coerceAtLeast(14)
-        val minBarH = (height * 0.015f).toInt().coerceAtLeast(1)
-        val maxBarH = (height * 0.15f).toInt().coerceAtLeast(4)
+        val maxBarW = (width * 0.50f).toInt().coerceAtLeast(16)
+        val minBarH = (height * 0.03f).toInt().coerceAtLeast(3)
+        val maxBarH = (height * 0.25f).toInt().coerceAtLeast(10)
 
         for (y in (height * 0.08f).toInt() until (height * 0.90f).toInt()) {
             var inBarEdge = false
@@ -248,7 +248,7 @@ class CannyEdgeAndHealthBarDetector(
                                 if (sx !in 0 until width) continue
                                 val bIdx = bottomY * width + sx
                                 val hit = edgeMap[bIdx] == 2.toByte() ||
-                                        (bottomY > 0 && edgeMap[bIdx - width] == 2.toByte()) ||
+                                        (testH > 2 && bottomY > 0 && edgeMap[bIdx - width] == 2.toByte()) ||
                                         (bottomY < height - 1 && edgeMap[bIdx + width] == 2.toByte())
                                 if (hit) bottomEdgeHits++
                             }

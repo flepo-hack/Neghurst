@@ -599,9 +599,9 @@ class RenderaOverlayService : Service() {
             }
             addView(hudToggleBtn)
 
-            // Fast Auto-Detect Button (Brawl Stars)
+            // Fast Auto-Detect Button
             val autoDetectBtn = TextView(this@RenderaOverlayService).apply {
-                text = "SMART AUTO-DETECT (BRAWL STARS)"
+                text = "SMART AUTO-CALIBRATION"
                 setTextColor(android.graphics.Color.argb(255, 255, 215, 0))
                 textSize = 12f
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
@@ -1005,7 +1005,7 @@ class RenderaOverlayService : Service() {
         triggerHapticFeedback(70L)
         android.widget.Toast.makeText(
             this@RenderaOverlayService,
-            "Calibrated for Brawl Stars: Joystick (${joy.first.toInt()}, ${joy.second.toInt()}), Player (${player.first.toInt()}, ${player.second.toInt()})",
+            "Calibrated: Joystick (${joy.first.toInt()}, ${joy.second.toInt()}), Player (${player.first.toInt()}, ${player.second.toInt()})",
             android.widget.Toast.LENGTH_SHORT
         ).show()
     }

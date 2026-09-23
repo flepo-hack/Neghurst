@@ -35,7 +35,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -328,14 +330,7 @@ class MainActivity : ComponentActivity() {
                                 if (isRunning) {
                                     stopOverlayService()
                                 } else {
-                                    val brawlStars = installedApps.firstOrNull {
-                                        it.packageName == "com.supercell.brawlstars" || it.appName.contains("Brawl", ignoreCase = true)
-                                    }
-                                    if (brawlStars != null) {
-                                        launchTargetGame(brawlStars, hasOverlay, hasAccessibility)
-                                    } else {
-                                        showGameSelectDialog = true
-                                    }
+                                    showGameSelectDialog = true
                                 }
                             },
                             modifier = Modifier
@@ -393,7 +388,7 @@ class MainActivity : ComponentActivity() {
                                     letterSpacing = 1.sp
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
-                                InstructionRow(num = "1", text = "Press START and pick your game (e.g. Brawl Stars).")
+                                InstructionRow(num = "1", text = "Press START and select your target game from the list.")
                                 InstructionRow(num = "2", text = "In-game, tap the floating bubble to calibrate your movement joystick.")
                                 InstructionRow(num = "3", text = "After calibration, a single tap pauses or resumes auto-dodge.")
                                 InstructionRow(num = "4", text = "Long-press the bubble anytime to open the settings menu.")
@@ -619,7 +614,7 @@ class MainActivity : ComponentActivity() {
                                         GamePickerOptionItem(
                                             title = "Universal (Current Game On-Screen)",
                                             subtitle = "Launch bubble immediately on active screen",
-                                            iconChar = "⚡",
+                                            icon = Icons.Default.Layers,
                                             onClick = {
                                                 showGameSelectDialog = false
                                                 launchTargetGame(null, hasOverlay, hasAccessibility)
@@ -632,7 +627,7 @@ class MainActivity : ComponentActivity() {
                                         GamePickerOptionItem(
                                             title = app.appName,
                                             subtitle = app.packageName,
-                                            iconChar = "🎮",
+                                            icon = Icons.Default.SportsEsports,
                                             onClick = {
                                                 showGameSelectDialog = false
                                                 launchTargetGame(app, hasOverlay, hasAccessibility)
@@ -766,7 +761,7 @@ class MainActivity : ComponentActivity() {
     private fun GamePickerOptionItem(
         title: String,
         subtitle: String,
-        iconChar: String,
+        icon: androidx.compose.ui.graphics.vector.ImageVector,
         onClick: () -> Unit
     ) {
         Box(
@@ -779,9 +774,11 @@ class MainActivity : ComponentActivity() {
                 .padding(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = iconChar,
-                    fontSize = 22.sp
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = NeonCyan,
+                    modifier = Modifier.size(24.dp)
                 )
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
