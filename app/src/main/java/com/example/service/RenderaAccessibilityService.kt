@@ -78,6 +78,7 @@ class RenderaAccessibilityService : AccessibilityService() {
                 lineTo(endX, endY)
             }
 
+            // 15ms duration for zero-latency dynamic dodge stroke
             val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(15L, 500L))
             val gesture = GestureDescription.Builder()
                 .addStroke(stroke)
@@ -103,5 +104,25 @@ class RenderaAccessibilityService : AccessibilityService() {
             onResult?.invoke(false)
             false
         }
+    }
+
+    /**
+     * Executes ultra-fast 15 ms dodge swipe in the direction of the given angle in radians.
+     * Can be invoked via JNI or directly from vision physics loop.
+     */
+    fun executeDodge(angleRad: Float, onResult: ((Boolean) -> Unit)? = null): Boolean {
+        val metrics = resources.displayMetrics
+        val screenW = metrics.widthPixels.toFloat()
+        val screenH = metrics.heightPixels.toFloat()
+        val isLandscape = screenW > screenH
+
+        val startX = if (isLandscape) 0.20f * screenW else 0.25f * screenW
+        val startY = if (isLandscape) 0.78f * screenH else 0.80f * screenH
+        val radius = 150f
+
+        val targetX = (startX + (kotlin.math.cos(angleRad.toDouble()).toFloat() * radius)).coerceIn(10f, screenW - 10f)
+        val targetY = (startY + (kotlin.math.sin(angleRad.toDouble()).toFloat() * radius)).coerceIn(10f, screenH - 10f)
+
+        return dispatchJoystickStroke(startX, startY, targetX, targetY, 15L, onResult)
     }
 }

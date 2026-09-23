@@ -96,6 +96,10 @@ class RenderaPreferences(context: Context) {
         saveProfile(updated)
     }
 
+    fun setAutoDodge(enabled: Boolean) {
+        toggleAutoDodge(enabled)
+    }
+
     fun updateSensitivity(sensitivity: Float) {
         val updated = _currentProfile.value.copy(sensitivity = sensitivity.coerceIn(0.1f, 1.0f))
         saveProfile(updated)
