@@ -238,27 +238,46 @@ class ScreenThreatDetector(
         val playerRadius = tuning.playerRadiusNorm * screenWidth
         val (playerX, playerY, detected) = resolvePlayerPosition(result, screenWidth, screenHeight)
 
-        val projectile = if (result.threatValid) {
-            CollisionSolver.Projectile(
-                x = result.threatX,
-                y = result.threatY,
-                vx = result.threatVx,
-                vy = result.threatVy,
-                confidence = result.threatConfidence.coerceIn(0f, 1f)
-            )
-        } else {
-            null
+        // Every actionable projectile the engine is tracking, not just the one it
+        // nominated. A burst is several pellets on a collision course and the
+        // escape has to be chosen against all of them.
+        // Every actionable projectile, taken from the always-on block. The
+        // engine's nominated threat is added if it is somehow missing, so the set
+        // is never silently empty while a threat is live.
+        val projectiles = buildList {
+            for (p in result.projectiles) {
+                add(
+                    CollisionSolver.Projectile(
+                        x = p.x, y = p.y, vx = p.vx, vy = p.vy,
+                        confidence = result.threatConfidence.coerceIn(0f, 1f)
+                    )
+                )
+            }
+            if (result.threatValid && none { it.x == result.threatX && it.y == result.threatY }) {
+                add(
+                    CollisionSolver.Projectile(
+                        x = result.threatX,
+                        y = result.threatY,
+                        vx = result.threatVx,
+                        vy = result.threatVy,
+                        confidence = result.threatConfidence.coerceIn(0f, 1f)
+                    )
+                )
+            }
+        }
+        val projectile = projectiles.minByOrNull {
+            CollisionSolver.timeToClosestApproach(playerX, playerY, it, tuning.reactionHorizonSec)
         }
 
         // Recompute the escape locally so the plan is expressed in the same units
         // the gesture planner needs, and so the Kotlin unit tests cover the exact
         // maths that ends up being dispatched.
-        val escape = if (projectile != null) {
+        val escape = if (projectiles.isNotEmpty()) {
             CollisionSolver.solve(
                 playerX = playerX,
                 playerY = playerY,
                 playerRadiusPx = playerRadius,
-                projectiles = listOf(projectile),
+                projectiles = projectiles,
                 screenWidthPx = screenWidth.toFloat(),
                 screenHeightPx = screenHeight.toFloat(),
                 reactionHorizonSec = tuning.reactionHorizonSec,

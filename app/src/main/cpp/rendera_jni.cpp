@@ -19,8 +19,16 @@
 
 namespace {
 
-constexpr jint kOutFloatCount = 24;
-constexpr jint kOutIntCount = 13;
+// 24 solution floats, then a fixed block of actionable projectiles. The block is
+// on the always-on path rather than behind the debug flag: the escape has to be
+// chosen against every incoming shot, so the list cannot be something that only
+// exists when the HUD happens to be visible.
+constexpr jint kSolutionFloats = 24;
+constexpr jint kMaxProjectiles = 8;
+constexpr jint kProjectileFloats = 5;  // x, y, vx, vy, timeToImpactSec
+constexpr jint kOutFloatCount =
+    kSolutionFloats + kMaxProjectiles * kProjectileFloats;  // 64
+constexpr jint kOutIntCount = 14;
 
 /** Floats per track in nativeCopyTracks: x, y, vx, vy, speedNorm, isProjectile, kind. */
 constexpr jint kTrackFloats = 7;
@@ -294,6 +302,37 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
     // Enemy marks are classified every frame, not only when the debug HUD is
     // on, so the readout cannot silently report zero.
     i32[12] = static_cast<int>(e->enemies().size());
+
+    // Actionable projectiles, so the Kotlin escape planner can score a heading
+    // against a burst instead of a single shot. Sorted by time to impact so the
+    // earliest ones survive the cap.
+    const auto& allTracks = e->tracks();
+    std::vector<const rendera::Track*> actionable;
+    actionable.reserve(allTracks.size());
+    for (const auto& t : allTracks) {
+        if (!t.isProjectile) continue;
+        if (t.kind == rendera::TrackKind::kBouncer) continue;
+        actionable.push_back(&t);
+    }
+    std::sort(actionable.begin(), actionable.end(),
+              [](const rendera::Track* a, const rendera::Track* b) {
+                  const float da = a->x * a->x + a->y * a->y;
+                  const float db = b->x * b->x + b->y * b->y;
+                  return da < db;  // nearest first: the ones that matter most
+              });
+    if (actionable.size() > static_cast<size_t>(kMaxProjectiles)) {
+        actionable.resize(static_cast<size_t>(kMaxProjectiles));
+    }
+    i32[13] = static_cast<int>(actionable.size());
+    for (size_t i = 0; i < actionable.size(); ++i) {
+        const auto& t = *actionable[i];
+        const int o = kSolutionFloats + static_cast<int>(i) * kProjectileFloats;
+        f[o + 0] = t.x;
+        f[o + 1] = t.y;
+        f[o + 2] = t.vx;
+        f[o + 3] = t.vy;
+        f[o + 4] = t.speed;
+    }
 
     if (outF != nullptr && env->GetArrayLength(outF) >= kOutFloatCount) {
         env->SetFloatArrayRegion(outF, 0, kOutFloatCount, f);

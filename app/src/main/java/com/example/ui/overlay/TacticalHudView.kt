@@ -57,6 +57,7 @@ class TacticalHudView(context: Context) : View(context) {
         val accessibilityReady: Boolean = false,
         val gameForeground: Boolean = true,
         val autoDodgeArmed: Boolean = false,
+        val dodgePlan: String = "",
         val note: String = ""
     )
 
@@ -161,6 +162,7 @@ class TacticalHudView(context: Context) : View(context) {
                 if (s.escapeSufficient) "" else " PARTIAL"
         }
         lines += "acc " + if (s.accessibilityReady) "READY" else "OFF"
+        if (s.dodgePlan.isNotEmpty()) lines += s.dodgePlan
         lines += "  game " + if (s.gameForeground) "FGD" else "BG"
         if (s.note.isNotEmpty()) lines += s.note
 

@@ -27,10 +27,10 @@ class NativeVisionEngine(
         private const val TAG = "NativeVisionEngine"
 
         /** Number of floats the native layer writes. Must match `kOutFloatCount`. */
-        const val OUT_FLOATS = 24
+        const val OUT_FLOATS = 64
 
         /** Number of ints the native layer writes. Must match `kOutIntCount`. */
-        const val OUT_INTS = 13
+        const val OUT_INTS = 14
 
         /** Must match `kExpected` in `nativeConfigure`. */
         const val CONFIG_FLOATS = 48

@@ -174,6 +174,9 @@ enum class TrackKind(val code: Int) {
     }
 }
 
+/** One incoming shot, as reported by [VisionResult.projectiles]. */
+class Projectile(val x: Float, val y: Float, val vx: Float, val vy: Float, val speed: Float)
+
 /** One tracked object, as returned by [NativeVisionEngine.readTracks]. */
 class TrackReading(private val f: FloatArray, private val offset: Int) {
     val x: Float get() = f[offset]
@@ -304,6 +307,33 @@ class VisionResult(
 
     /** Enemy marks found in the world-anchored frame. Counted every frame. */
     val enemyCount: Int get() = i[12]
+
+    /**
+     * Every actionable projectile the engine is tracking, nearest first.
+     *
+     * On the always-on path rather than behind the debug flag, because the escape
+     * heading has to be chosen against a whole burst, not a single shot.
+     */
+    val projectiles: List<Projectile> by lazy(LazyThreadSafetyMode.NONE) {
+        val n = i[13].coerceIn(0, MAX_PROJECTILES)
+        List(n) { k ->
+            val o = SOLUTION_FLOATS + k * PROJECTILE_FLOATS
+            Projectile(
+                x = f[o],
+                y = f[o + 1],
+                vx = f[o + 2],
+                vy = f[o + 3],
+                speed = f[o + 4]
+            )
+        }
+    }
+
+    companion object {
+        /** Floats before the projectile block. Must match `kSolutionFloats`. */
+        const val SOLUTION_FLOATS = 24
+        const val MAX_PROJECTILES = 8
+        const val PROJECTILE_FLOATS = 5
+    }
 
     /** Frames the engine has processed since the last reset. */
     val framesProcessed: Int get() = i[10]

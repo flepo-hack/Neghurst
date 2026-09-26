@@ -1224,6 +1224,18 @@ void VisionEngine::updateTracks() {
     for (size_t i = 0; i < blobs_.size(); ++i) {
         if (blobUsed_[i]) continue;
         if (static_cast<int>(tracks_.size()) >= cfg_.maxTracks) break;
+
+        // Discard the brawler's own effects: splashes from puddles, rustle from
+        // bushes, dust off walls. They are born on top of the player and travel
+        // with it, so they are undodgeable by construction and following them
+        // only produces phantom threats.
+        if (player_.valid) {
+            const float ownR = cfg_.ownEffectRadiusNorm * screenW;
+            const float ddx = blobs_[i].sx - player_.x;
+            const float ddy = blobs_[i].sy - player_.y;
+            if (ddx * ddx + ddy * ddy < ownR * ownR) continue;
+        }
+
         Track t;
         t.id = nextTrackId_++;
         t.x = blobs_[i].sx;
@@ -1240,6 +1252,24 @@ void VisionEngine::updateTracks() {
     tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
                                  [&](const Track& t) { return t.misses > cfg_.trackMaxMisses; }),
                   tracks_.end());
+
+    // A track that has never left the player's neighbourhood is the brawler's
+    // own effect, whatever it looked like at birth. Real projectiles cross the
+    // arena; splashes and rustle stay glued to the player. This is the cheaper
+    // and more reliable of the two filters, because it uses the whole history
+    // rather than one frame.
+    if (player_.valid) {
+        const float trackR = cfg_.ownEffectTrackNorm * screenW;
+        const float trackR2 = trackR * trackR;
+        tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
+                                     [&](const Track& t) {
+                                         if (t.hits < cfg_.ownEffectMinHits) return false;
+                                         const float dx = t.x - player_.x;
+                                         const float dy = t.y - player_.y;
+                                         return dx * dx + dy * dy < trackR2;
+                                     }),
+                      tracks_.end());
+    }
 
     // --- classify, only once a track has enough history to be sure -----------
     // Deliberately after the gates above: labelling must not be able to change

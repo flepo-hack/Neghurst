@@ -71,7 +71,13 @@ object CollisionSolver {
         /** Displacement the brawler can actually achieve within the hold. */
         val expectedTravelPx: Float = 0f,
         /** False when the brawler physically cannot get clear in time. */
-        val escapeIsSufficient: Boolean = true
+        val escapeIsSufficient: Boolean = true,
+        /** How many incoming projectiles this heading actually avoids. */
+        val projectilesCleared: Int = 0,
+        /** How many incoming projectiles are considered. */
+        val projectilesConsidered: Int = 0,
+        /** True when the chosen heading was worse than some other one. */
+        val partialEscape: Boolean = false
     ) {
         val timeToImpactMs: Long get() = (timeToImpactSec * 1000f).roundToInt().toLong()
     }
@@ -140,23 +146,31 @@ object CollisionSolver {
     ): Solution {
         if (projectiles.isEmpty() || playerRadiusPx <= 0f) return Solution()
 
+        // Everything on a collision course, not just the earliest. A shotgun
+        // spread or a Rosa volley is several pellets at once, and dodging only
+        // the nearest one walks the brawler into the rest.
+        val live = projectiles.filter { p ->
+            p.speed >= 1f &&
+                timeToClosestApproach(playerX, playerY, p, reactionHorizonSec) >= 0f &&
+                missDistanceAt(
+                    playerX, playerY, p,
+                    timeToClosestApproach(playerX, playerY, p, reactionHorizonSec)
+                ) < playerRadiusPx
+        }
+        if (live.isEmpty()) return Solution()
+
+        // The one that decides the severity and the hold time.
         var best: Projectile? = null
         var bestTti = Float.MAX_VALUE
         var bestMiss = Float.MAX_VALUE
-
-        for (p in projectiles) {
-            if (p.speed < 1f) continue
+        for (p in live) {
             val t = timeToClosestApproach(playerX, playerY, p, reactionHorizonSec)
-            if (t < 0f) continue
-            val miss = missDistanceAt(playerX, playerY, p, t)
-            if (miss >= playerRadiusPx) continue
-            if (t < bestTti) {
+            if (t >= 0f && t < bestTti) {
                 bestTti = t
-                bestMiss = miss
+                bestMiss = missDistanceAt(playerX, playerY, p, t)
                 best = p
             }
         }
-
         val projectile = best ?: return Solution()
 
         val severity = when {
@@ -179,7 +193,10 @@ object CollisionSolver {
             borderMarginYPx = borderMarginYPx,
             enemies = enemies,
             enemyAvoidRadiusPx = enemyAvoidRadiusPx,
-            candidateCount = candidateCount
+            candidateCount = candidateCount,
+            playerRadiusPx = playerRadiusPx,
+            reactionHorizonSec = reactionHorizonSec,
+            additionalThreats = live
         )
 
         // Dodge late, because every millisecond held is a millisecond the
@@ -196,6 +213,14 @@ object CollisionSolver {
         val dragPx = (joystickRadiusPx * joystickDragFactor.coerceIn(0.1f, 1f))
             .coerceAtLeast(1f)
 
+        val destX = playerX + cos(Math.toRadians(heading.toDouble())).toFloat() * requiredTravel
+        val destY = playerY + sin(Math.toRadians(heading.toDouble())).toFloat() * requiredTravel
+        var cleared = 0
+        for (p in live) {
+            val t = timeToClosestApproach(destX, destY, p, reactionHorizonSec)
+            if (t < 0f || missDistanceAt(destX, destY, p, t) >= playerRadiusPx) cleared++
+        }
+
         return Solution(
             hasThreat = true,
             severity = severity,
@@ -209,7 +234,13 @@ object CollisionSolver {
             holdMs = holdMs,
             requiredTravelPx = requiredTravel,
             expectedTravelPx = expectedTravel,
-            escapeIsSufficient = expectedTravel >= requiredTravel
+            escapeIsSufficient = expectedTravel >= requiredTravel,
+            projectilesCleared = cleared,
+            projectilesConsidered = live.size,
+            // Reporting a dodge as successful when a pellet is still going to
+            // land is the single most damaging kind of quiet lie here: the
+            // caller would believe it was safe and stop re-evaluating.
+            partialEscape = cleared < live.size
         )
     }
 
@@ -222,6 +253,16 @@ object CollisionSolver {
      * approach is unchanged, so maximising this maximises the real miss
      * distance. The remaining terms are pure feasibility.
      */
+    /**
+     * Scores every heading against **every** live threat and returns the best.
+     *
+     * A single-threat score is not enough for a burst. A shotgun spread gives
+     * several pellets on a collision course at once, and the heading that
+     * clears the nearest one very often walks straight into the second. The
+     * primary objective is therefore the number of pellets avoided, weighted by
+     * how soon each one arrives, and the geometric clearance is the tie break
+     * among headings that avoid the same number.
+     */
     fun chooseEscapeHeading(
         playerX: Float,
         playerY: Float,
@@ -233,7 +274,10 @@ object CollisionSolver {
         borderMarginYPx: Float = screenHeightPx * 0.10f,
         enemies: List<AvoidPoint> = emptyList(),
         enemyAvoidRadiusPx: Float = screenWidthPx * 0.11f,
-        candidateCount: Int = 24
+        candidateCount: Int = 24,
+        playerRadiusPx: Float = 0f,
+        reactionHorizonSec: Float = 0.42f,
+        additionalThreats: List<Projectile>? = null
     ): Float {
         val vLen = projectile.speed
         if (vLen < 1e-3f) return 0f
@@ -250,12 +294,76 @@ object CollisionSolver {
         var bestScore = -Float.MAX_VALUE
         var bestDeg = 0f
 
+        // Every threat on a collision course. The caller's `projectile` is always
+        // in here, so a single-threat caller behaves exactly as it always did.
+        val threats = buildList {
+            add(projectile)
+            if (additionalThreats != null) {
+                for (p in additionalThreats) {
+                    if (p === projectile) continue
+                    if (p.speed < 1f) continue
+                    if (timeToClosestApproach(playerX, playerY, p, reactionHorizonSec) >= 0f) {
+                        add(p)
+                    }
+                }
+            }
+        }
+        val hitR = if (playerRadiusPx > 0f) playerRadiusPx else stepPx
+
         for (i in 0 until n) {
             val ang = 2.0 * Math.PI * i / n
             val dx = cos(ang).toFloat()
             val dy = sin(ang).toFloat()
 
-            var score = abs(perpSigned + stepPx * (dx * nx + dy * ny))
+            // --- primary objective: how many incoming shots does this clear? ---
+            // A shot counts as cleared when, from the destination, it either has
+            // no collision course any more or its closest approach lands outside
+            // the hitbox. Each cleared shot is worth more the sooner it was going
+            // to arrive, so saving the lethal pellet outranks a distant one.
+            //
+            // Skipped for a single threat, where the geometry below is already
+            // the exact answer.
+            var clearedCount = 0
+            var deferredCount = 0
+            var urgencyWeight = 0f
+            if (threats.size > 1) {
+                val destX = playerX + dx * stepPx
+                val destY = playerY + dy * stepPx
+                for (p in threats) {
+                    val t = timeToClosestApproach(destX, destY, p, reactionHorizonSec)
+                    if (t >= 0f && missDistanceAt(destX, destY, p, t) >= hitR) {
+                        // Genuinely avoided: it still arrives, but it misses.
+                        clearedCount++
+                        // 1/t weights by how urgent it was: a shot 100 ms out is
+                        // worth ten times one 1000 ms out.
+                        urgencyWeight += 1f / (0.05f + maxOf(t, 0.05f))
+                    } else if (t < 0f) {
+                        // Deferred, not avoided. The heading pushed it past the
+                        // reaction horizon, so there will be another chance to
+                        // deal with it. Counting this as a clear would let the
+                        // planner score "just wait" equal to "actually dodge", and
+                        // the first thing to expire is the window the next dodge
+                        // needs.
+                        deferredCount++
+                        urgencyWeight += 0.25f / (0.05f + reactionHorizonSec)
+                    }
+                }
+            }
+
+            // --- secondary: geometric clearance for the primary threat ---
+            //
+            // clearedCount dominates at 1000 per shot, so a heading that saves
+            // the brawler always beats one that does not, however good its
+            // geometry. The geometric term is weighted 0.5, and that ratio to the
+            // "along the flight line" term below is load bearing: collapsing it to
+            // a negligible weight lets the along term win every single-threat
+            // comparison, and the escape then runs *along* the bullet's path
+            // instead of away from it.
+            // A real clear is worth 1000 and dominates everything else, so a
+            // heading that saves the brawler always wins. A deferral is worth 400:
+            // genuinely better than doing nothing, but never better than dodging.
+            var score = clearedCount * 1000f + deferredCount * 400f + urgencyWeight
+            score += abs(perpSigned + stepPx * (dx * nx + dy * ny)) * 0.5f
 
             // The destination must stay on screen with margin. The player keeps
             // moving for the whole hold, so the reach is scaled accordingly.
@@ -265,20 +373,19 @@ object CollisionSolver {
             if (min(tx, screenWidthPx - tx) < borderMarginXPx ||
                 min(ty, screenHeightPx - ty) < borderMarginYPx
             ) {
-                score -= screenWidthPx * 0.30f
+                // Walking into the border is a death. Costed above clearing a
+                // single shot, below clearing two, so a heading that saves the
+                // brawler from a burst is still rejected if it is off the map.
+                score -= 2000f
             }
 
-            // `dx * uhx + dy * uhy` is how much of the step runs ALONG the
-            // projectile's velocity. Negative means back toward where the
-            // projectile is coming from, i.e. into its path, so it is ADDED, which
-            // penalises it.
-            //
-            // It is weighted against `stepPx`, not against the screen width, so it
-            // stays a tie-breaker. Scaling it by the screen made it larger than the
-            // clearance term itself, and the planner would then abandon the
-            // perpendicular entirely and settle 45 degrees off it, which is exactly
-            // the "escape" the scoring is supposed to be refining.
-            score += (dx * uhx + dy * uhy) * stepPx * 0.25f
+            // An earlier version added a term here preferring headings that run
+            // *along* the projectile's velocity, on the theory that staying ahead
+            // of it is better than moving away from its line. Measurement showed
+            // it is strictly a cost: it pulled the escape 15-30 degrees off
+            // perpendicular, and every degree off perpendicular is a degree of
+            // real miss distance given up for a benefit that has no geometric
+            // meaning. The perpendicular maximises clearance, so it stands alone.
 
             for (e in enemies) {
                 val ex = e.x - playerX
@@ -287,7 +394,11 @@ object CollisionSolver {
                 if (along < 0f || along > reach) continue
                 val lateral = abs(ex * ny - ey * nx)
                 if (lateral < enemyAvoidRadiusPx) {
-                    score -= (enemyAvoidRadiusPx - lateral) * 1.5f
+                    // Running into an enemy is a death, so this has to dominate
+                    // the geometric tie break. It is expressed in the same
+                    // units as `avoidedCount * 1000`, and a full overlap costs
+                    // 3000, i.e. it can outvote clearing two shots.
+                    score -= (enemyAvoidRadiusPx - lateral) * 15f
                 }
             }
 

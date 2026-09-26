@@ -169,7 +169,6 @@ class RenderaOverlayService : Service() {
     private var calibrationView: CalibrationOverlayView? = null
 
     private var lastDodgeAtMs = 0L
-    private var lastThreatSignature: FloatArray = FloatArray(0)
 
     private var statsFrames = 0
     private var statsWindowStartMs = 0L
@@ -188,6 +187,15 @@ class RenderaOverlayService : Service() {
 
     // Cross-thread, main thread reads it for auto-detect.
     @Volatile private var latestAnalysis: ScreenThreatDetector.Analysis? = null
+
+    /**
+     * Per-threat dodge bookkeeping. Replaces the old wall-clock cooldown, which
+     * went blind for the whole duration of a dodge and is the reason a second
+     * projectile could land while the first was still being avoided.
+     */
+    private val dodgeState = DodgeDecisionState(
+        canDispatch = { RenderaAccessibilityService.isIdle() }
+    )
 
     @Volatile private var autoDodgeArmed = false
     @Volatile private var anchors: Anchors = Anchors.defaultFor(0, 0)
@@ -279,6 +287,7 @@ class RenderaOverlayService : Service() {
             removeBubble()
         }
         autoDodgeArmed = false
+        dodgeState.reset()
     }
 
     // -----------------------------------------------------------------------
@@ -838,41 +847,35 @@ class RenderaOverlayService : Service() {
     }
 
     private fun maybeDodge(analysis: ScreenThreatDetector.Analysis, d: ScreenThreatDetector) {
-        val cooldown = prefs.dodgeCooldownMs.value
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastDodgeAtMs < cooldown) return
         if (!RenderaAccessibilityService.isAvailable()) return
+        if (displayWidth <= 0 || displayHeight <= 0) return
 
-        // Suppress repeated dodges for the *same* projectile. Without this, one
-        // threat that stays on screen produces a dodge every single frame once
-        // the cooldown expires, which spams the joystick and stops the brawler
-        // from ever reaching safety.
-        val raw = analysis.raw
-        val signature = floatArrayOf(
-            raw.threatTrackId.toFloat(),
-            (raw.timeToImpactSec * 1000f).roundToInt().toFloat()
-        )
-        val sameThreat = lastThreatSignature.size == 2 &&
-            lastThreatSignature[0] == signature[0] &&
-            abs(lastThreatSignature[1] - signature[1]) < 60f
-        if (sameThreat && now - lastDodgeAtMs < cooldown * 2) return
-        lastThreatSignature = signature
+        // The only hard gate is whether a gesture can be physically delivered.
+        // Everything else is per-threat bookkeeping, so a second projectile
+        // arriving mid-dodge is answered as soon as the stick is free instead of
+        // being swallowed by a cooldown.
+        if (!dodgeState.shouldDispatch(analysis, SystemClock.elapsedRealtime())) return
 
         val plan = d.planDodge(analysis, displayWidth, displayHeight)
         if (plan.isEmpty) {
+            // Refused: no usable plan. Forget the commitment so it is retried
+            // once anchors are fixed rather than being treated as handled.
+            dodgeState.onDispatchFailed()
             Log.d(TAG, "Dodge suppressed: no usable plan (anchors calibrated=${anchors.calibrated})")
             return
         }
+
         val accepted = RenderaAccessibilityService.dispatch(plan) { success ->
             if (success) {
                 lastDodgeAtMs = SystemClock.elapsedRealtime()
-                dodgeCount++
                 lastDodgeAngleDeg = analysis.escape.escapeHeadingDeg
+                dodgeCount++
             }
         }
         if (!accepted) {
-            // Do not consume the cooldown on a refusal, so the next frame retries.
-            lastThreatSignature = FloatArray(0)
+            // The system refused it, so nothing was sent. Forget the commitment
+            // so the next frame tries again instead of assuming we handled it.
+            dodgeState.onDispatchFailed()
             Log.d(TAG, "Dodge not dispatched (gesture busy or service down)")
         }
     }
@@ -986,6 +989,7 @@ class RenderaOverlayService : Service() {
             accessibilityReady = RenderaAccessibilityService.isAvailable(),
             gameForeground = isTargetInForeground(),
             autoDodgeArmed = autoDodgeArmed,
+            dodgePlan = dodgeState.describe(),
             note = buildAdvice()
         )
 
@@ -1162,7 +1166,7 @@ class RenderaOverlayService : Service() {
     private fun toggleAutoDodge() {
         autoDodgeArmed = !autoDodgeArmed
         prefs.setAutoDodge(autoDodgeArmed)
-        lastThreatSignature = FloatArray(0)
+        dodgeState.reset()
         lastDodgeAtMs = 0L
         triggerHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         mainHandler.post {

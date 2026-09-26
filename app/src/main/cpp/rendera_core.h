@@ -102,6 +102,27 @@ struct EngineConfig {
     int maxEnemies = 10;
     float enemyAvoidRadiusNorm = 0.11f;  // screen widths the escape must keep clear
 
+    // --- own-effect rejection ---
+    //
+    // Walking through a puddle, a bush or a wall of rubble produces motion at
+    // the player's own position: splashes, rustle, dust. After camera
+    // compensation that is the *only* motion such effects create, and without
+    // this filter each step of the brawler spawns a blob that the tracker then
+    // follows as if it were an incoming projectile. The tracker would then
+    // classify the player's own footstep as a threat and the brawler would run
+    // in circles dodging its own splash.
+    //
+    // Nothing can be dodged from inside the player's own sprite, so any motion
+    // that overlaps it is discarded. The radius is a fraction of the screen
+    // width rather than a cell count so it tracks the brawler at any scale.
+    float ownEffectRadiusNorm = 0.055f;
+    // A blob may be born slightly outside the radius and still be the player's
+    // own effect, so a track is also dropped if its whole life stays within a
+    // slightly larger radius: own effects travel with the brawler, they do not
+    // cross the arena.
+    float ownEffectTrackNorm = 0.085f;
+    int ownEffectMinHits = 2;
+
     // --- tracking ---
     int maxTracks = 16;
     int maxObservations = 48;
