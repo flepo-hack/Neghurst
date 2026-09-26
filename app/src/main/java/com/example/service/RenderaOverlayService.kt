@@ -566,8 +566,9 @@ class RenderaOverlayService : Service() {
         display.getRealMetrics(metrics)
         val rotated = display.rotation == android.view.Surface.ROTATION_90 ||
             display.rotation == android.view.Surface.ROTATION_270
-        return if (rotated) metrics.height to metrics.width
-        else metrics.width to metrics.height
+        // widthPixels/heightPixels, not width/height: the latter are Point's.
+        return if (rotated) metrics.heightPixels to metrics.widthPixels
+        else metrics.widthPixels to metrics.heightPixels
     }
 
     /**

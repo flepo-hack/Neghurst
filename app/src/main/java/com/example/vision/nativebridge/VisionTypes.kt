@@ -110,8 +110,8 @@ data class VisionTuning(
         dst[i++] = motionMaxShiftHalfRes.toFloat()
         dst[i++] = motionMinConfidence
         dst[i++] = fineRefineRadius.toFloat()
-        dst[i++] = diffNoiseFloor
-        dst[i++] = diffStrongThreshold
+        dst[i++] = diffNoiseFloor.toFloat()
+        dst[i++] = diffStrongThreshold.toFloat()
         dst[i++] = blobMinArea.toFloat()
         dst[i++] = blobMaxArea.toFloat()
         dst[i++] = blobMinFill
@@ -203,14 +203,14 @@ enum class TrackKind(val code: Int) {
 class Projectile(val x: Float, val y: Float, val vx: Float, val vy: Float, val speed: Float)
 
 /** One tracked object, as returned by [NativeVisionEngine.readTracks]. */
-class TrackReading(private val f: FloatArray, private val offset: Int) {
-    val x: Float get() = f[offset]
-    val y: Float get() = f[offset + 1]
-    val vx: Float get() = f[offset + 2]
-    val vy: Float get() = f[offset + 3]
-    val speedNorm: Float get() = f[offset + 4]
-    val isProjectile: Boolean get() = f[offset + 5] > 0.5f
-    val kind: TrackKind get() = TrackKind.fromCode(f[offset + 6].toInt())
+class TrackReading(private val values: FloatArray, private val offset: Int) {
+    val x: Float get() = values[offset]
+    val y: Float get() = values[offset + 1]
+    val vx: Float get() = values[offset + 2]
+    val vy: Float get() = values[offset + 3]
+    val speedNorm: Float get() = values[offset + 4]
+    val isProjectile: Boolean get() = values[offset + 5] > 0.5f
+    val kind: TrackKind get() = TrackKind.fromCode(values[offset + 6].toInt())
 
     /**
      * How dangerous this specific object is, in screen pixels. Only projectiles
@@ -279,59 +279,63 @@ enum class ThreatSeverity(val code: Int) {
  * frame.
  */
 class VisionResult(
-    f: FloatArray,
-    i: IntArray
+    // `private val`, not bare parameters: a bare constructor parameter is only in
+    // scope for property initialisers and init blocks, NOT inside member function
+    // bodies. Every `get() = ints[n]` below therefore failed to resolve `i` until
+    // these became properties.
+    private val floats: FloatArray,
+    private val ints: IntArray
 ) {
     // --- global motion ---
-    val motionDxGrid: Float = f[0]
-    val motionDyGrid: Float = f[1]
-    val motionConfidence: Float = f[2]
-    val motionValid: Boolean = f[3] > 0.5f
+    val motionDxGrid: Float = floats[0]
+    val motionDyGrid: Float = floats[1]
+    val motionConfidence: Float = floats[2]
+    val motionValid: Boolean = floats[3] > 0.5f
 
     // --- player ---
-    val playerX: Float = f[4]
-    val playerY: Float = f[5]
-    val playerVx: Float = f[6]
-    val playerVy: Float = f[7]
-    val playerGreenness: Float = f[8]
-    val playerVisible: Boolean = f[9] > 0.5f
-    val playerLocked: Boolean = f[10] > 0.5f
-    val playerFramesSinceSeen: Int = f[11].toInt()
-    val playerComponentArea: Int = i[7]
+    val playerX: Float = floats[4]
+    val playerY: Float = floats[5]
+    val playerVx: Float = floats[6]
+    val playerVy: Float = floats[7]
+    val playerGreenness: Float = floats[8]
+    val playerVisible: Boolean = floats[9] > 0.5f
+    val playerLocked: Boolean = floats[10] > 0.5f
+    val playerFramesSinceSeen: Int = floats[11].toInt()
+    val playerComponentArea: Int = ints[7]
 
     // --- threat ---
-    val timeToImpactSec: Float = f[12]
-    val threatX: Float = f[13]
-    val threatY: Float = f[14]
-    val threatVx: Float = f[15]
-    val threatVy: Float = f[16]
-    val threatSpeed: Float = f[17]
+    val timeToImpactSec: Float = floats[12]
+    val threatX: Float = floats[13]
+    val threatY: Float = floats[14]
+    val threatVx: Float = floats[15]
+    val threatVy: Float = floats[16]
+    val threatSpeed: Float = floats[17]
     /** 0..1 straightness of the tracked projectile's velocity. */
-    val threatConfidence: Float = f[18]
-    val escapeHeadingDeg: Float = f[19]
-    val escapeDirX: Float = f[20]
-    val escapeDirY: Float = f[21]
-    val escapeStepPixels: Float = f[22]
-    val escapeTravelMs: Float = f[23]
+    val threatConfidence: Float = floats[18]
+    val escapeHeadingDeg: Float = floats[19]
+    val escapeDirX: Float = floats[20]
+    val escapeDirY: Float = floats[21]
+    val escapeStepPixels: Float = floats[22]
+    val escapeTravelMs: Float = floats[23]
 
-    val severityRaw: Int = i[0]
-    val threatValid: Boolean = i[1] != 0
-    val blobCount: Int = i[2]
-    val trackCount: Int = i[3]
-    val projectileCount: Int = i[4]
-    val threatTrackId: Int = i[5]
-    val escapeSufficient: Boolean = i[6] != 0
+    val severityRaw: Int = ints[0]
+    val threatValid: Boolean = ints[1] != 0
+    val blobCount: Int = ints[2]
+    val trackCount: Int = ints[3]
+    val projectileCount: Int = ints[4]
+    val threatTrackId: Int = ints[5]
+    val escapeSufficient: Boolean = ints[6] != 0
 
     val severity: ThreatSeverity get() = ThreatSeverity.fromCode(severityRaw)
 
     /** Tracks classified as the Brawl Ball. */
-    val ballCount: Int get() = i[8]
+    val ballCount: Int get() = ints[8]
 
     /** Tracks classified as wall-bouncing shots. */
-    val bouncerCount: Int get() = i[9]
+    val bouncerCount: Int get() = ints[9]
 
     /** Enemy marks found in the world-anchored frame. Counted every frame. */
-    val enemyCount: Int get() = i[12]
+    val enemyCount: Int get() = ints[12]
 
     /**
      * Every actionable projectile the engine is tracking, nearest to the brawler
@@ -348,18 +352,18 @@ class VisionResult(
      * heading has to be chosen against a whole burst, not a single shot.
      */
     val projectiles: List<Projectile> = run {
-        val n = i[13].coerceIn(0, MAX_PROJECTILES)
+        val n = ints[13].coerceIn(0, MAX_PROJECTILES)
         ArrayList<Projectile>(n).apply {
             for (k in 0 until n) {
                 val o = SOLUTION_FLOATS + k * PROJECTILE_FLOATS
                 if (o + PROJECTILE_FLOATS - 1 >= f.size) break
                 add(
                     Projectile(
-                        x = f[o],
-                        y = f[o + 1],
-                        vx = f[o + 2],
-                        vy = f[o + 3],
-                        speed = f[o + 4]
+                        x = floats[o],
+                        y = floats[o + 1],
+                        vx = floats[o + 2],
+                        vy = floats[o + 3],
+                        speed = floats[o + 4]
                     )
                 )
             }
@@ -443,10 +447,10 @@ class VisionResult(
     }
 
     /** Frames the engine has processed since the last reset. */
-    val framesProcessed: Int get() = i[10]
+    val framesProcessed: Int get() = ints[10]
 
     /** Frames dropped by the capture ring since the last reset. */
-    val droppedFrames: Int get() = i[11]
+    val droppedFrames: Int get() = ints[11]
 
     val timeToImpactMs: Long get() = (timeToImpactSec * 1000f).toLong()
 }

@@ -209,8 +209,11 @@ class RenderaAccessibilityService : AccessibilityService() {
                 display.getRealMetrics(metrics)
                 val rotated = display.rotation == Surface.ROTATION_90 ||
                     display.rotation == Surface.ROTATION_270
-                val w = if (rotated) metrics.height else metrics.width
-                val h = if (rotated) metrics.width else metrics.height
+                // DisplayMetrics exposes widthPixels/heightPixels. It has no
+                // `width` or `height`; those live on android.util.Point, which is
+                // why this silently fails to compile rather than misbehaving.
+                val w = if (rotated) metrics.heightPixels else metrics.widthPixels
+                val h = if (rotated) metrics.widthPixels else metrics.heightPixels
                 if (w > 0 && h > 0) {
                     displayWidth = w
                     displayHeight = h

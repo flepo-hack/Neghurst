@@ -62,6 +62,12 @@ jobs:
       - name: Tarkista C++-jäsenten nimet
         run: python3 .github/scripts/check_cpp.py
 
+      # Kotlin mistake classes that the compiler reports at the *use* site, which
+      # reads like a classpath problem rather than the field name it is. Each of
+      # these cost a full CI cycle; all are cheap to spot by reading.
+      - name: Tarkista Kotlin-virheet
+        run: python3 .github/scripts/check_kotlin.py
+
       - name: Tarkista että jokainen .cpp pääsee CMakeLists:iin
         run: |
           set -euo pipefail
