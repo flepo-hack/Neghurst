@@ -33,12 +33,12 @@ jobs:
       # `app/build.gradle.kts`.
       - name: Asenna Android SDK, NDK ja CMake
         run: |
-          sdkmanager --install \
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
             "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
-          sdkmanager --licenses <<< 'y' || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses <<< 'y' || true
 
       - name: Luo vaadittu Keystore (my-upload-key.jks)
         run: |
@@ -127,3 +127,4 @@ jobs:
           files: Rakenna_AP3K.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
