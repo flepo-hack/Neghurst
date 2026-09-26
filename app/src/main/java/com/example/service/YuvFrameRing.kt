@@ -225,7 +225,16 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             // than rows * rowStride.
             val needed = (rows - 1) * srcRowStride + samples
             val n = minOf(needed, limit)
-            if (n > 0) dst.put(buffer, 0, n)
+            if (n > 0) {
+                // `put(ByteBuffer, int, int)` was only added to java.nio in Java
+                // 13 / API 33, so on a minSdk 24 device the compiler resolves
+                // this call to the ByteArray overload and it fails. Duplicate,
+                // window it, and use put(ByteBuffer), which always exists.
+                val src = buffer.duplicate()
+                src.position(0)
+                src.limit(n)
+                dst.put(src)
+            }
             dst.position(0)
             return
         }

@@ -400,7 +400,8 @@ object CollisionSolver {
                 val eDist = hypot(ex, ey)
                 if (eDist > 1e-3f) {
                     val approach = (dx * ex + dy * ey) / eDist
-                    val proximity = clamp(1f - (eDist - enemyAvoidRadiusPx) / enemyAvoidRadiusPx, 0f, 1f)
+                    val proximity =
+                        (1f - (eDist - enemyAvoidRadiusPx) / enemyAvoidRadiusPx).coerceIn(0f, 1f)
                     // Scaled by the distance the step actually CLOSES, not by the
                     // avoid radius. Scaling by the radius made the term worth up
                     // to 63, which outweighed the clearance term and tilted the

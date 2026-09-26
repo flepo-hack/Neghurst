@@ -307,7 +307,7 @@ class ScreenThreatDetector(
                 // not walk into one. They used to be dropped here, which meant
                 // the whole enemy-avoidance term was dead in the real app path and
                 // only ever exercised by tests.
-                enemies = result.enemies.map { CollisionSolver.AvoidPoint(it.x, it.y) }
+                enemies = result.enemyMarks.map { CollisionSolver.AvoidPoint(it.x, it.y) }
             )
         } else {
             CollisionSolver.Solution()

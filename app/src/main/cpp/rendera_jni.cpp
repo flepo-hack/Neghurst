@@ -25,9 +25,16 @@ namespace {
 // exists when the HUD happens to be visible.
 constexpr jint kSolutionFloats = 24;
 constexpr jint kMaxProjectiles = 8;
-constexpr jint kProjectileFloats = 5;  // x, y, vx, vy, timeToImpactSec
+constexpr jint kProjectileFloats = 5;  // x, y, vx, vy, speed
+
+// Enemy marks the escape planner must avoid walking into. Without them on the
+// always-on path the whole enemy-avoidance term is dead outside the tests.
+constexpr jint kMaxEnemies = 4;
+constexpr jint kEnemyFloats = 2;  // x, y
+
 constexpr jint kOutFloatCount =
-    kSolutionFloats + kMaxProjectiles * kProjectileFloats;  // 64
+    kSolutionFloats + kMaxProjectiles * kProjectileFloats +
+    kMaxEnemies * kEnemyFloats;  // 24 + 40 + 8 = 72
 constexpr jint kOutIntCount = 14;
 
 /** Floats per track in nativeCopyTracks: x, y, vx, vy, speedNorm, isProjectile, kind. */
@@ -345,6 +352,30 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
         f[o + 2] = t.vx;
         f[o + 3] = t.vy;
         f[o + 4] = t.speedNorm * e->screenWidthForReport();
+    }
+
+    // Enemy marks, nearest the brawler first, for the escape planner.
+    const auto& allEnemies = e->enemies();
+    std::vector<const rendera::EnemyMark*> marks;
+    marks.reserve(allEnemies.size());
+    for (const auto& em : allEnemies) marks.push_back(&em);
+    // Distinct parameter names: both sort lambdas used a/b, which made the two
+    // different types indistinguishable to the static member check.
+    std::sort(marks.begin(), marks.end(),
+              [px, py](const rendera::EnemyMark* ma, const rendera::EnemyMark* mb) {
+                  const float da = (ma->x - px) * (ma->x - px) + (ma->y - py) * (ma->y - py);
+                  const float db = (mb->x - px) * (mb->x - px) + (mb->y - py) * (mb->y - py);
+                  if (da != db) return da < db;
+                  return ma->area < mb->area;
+              });
+    if (marks.size() > static_cast<size_t>(kMaxEnemies)) {
+        marks.resize(static_cast<size_t>(kMaxEnemies));
+    }
+    for (size_t i = 0; i < marks.size(); ++i) {
+        const int o = kSolutionFloats + kMaxProjectiles * kProjectileFloats +
+            static_cast<int>(i) * kEnemyFloats;
+        f[o + 0] = marks[i]->x;
+        f[o + 1] = marks[i]->y;
     }
 
     if (outF != nullptr && env->GetArrayLength(outF) >= kOutFloatCount) {

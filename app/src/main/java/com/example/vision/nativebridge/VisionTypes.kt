@@ -338,6 +338,25 @@ class VisionResult(
     val enemyCount: Int get() = ints[12]
 
     /**
+     * Enemy positions the escape planner must not walk into, nearest first.
+     *
+     * On the always-on path: reading these from the debug buffer would mean
+     * there are none in normal use, and the enemy-avoidance term in the escape
+     * scorer would be dead in the real app while still passing every test.
+     */
+    val enemyMarks: List<Projectile> = run {
+        val n = ints[12].coerceIn(0, MAX_ENEMY_MARKS)
+        val base = SOLUTION_FLOATS + MAX_PROJECTILES * PROJECTILE_FLOATS
+        ArrayList<Projectile>(n).apply {
+            for (k in 0 until n) {
+                val o = base + k * ENEMY_FLOATS
+                if (o + ENEMY_FLOATS - 1 >= floats.size) break
+                add(Projectile(floats[o], floats[o + 1], 0f, 0f, 0f))
+            }
+        }
+    }
+
+    /**
      * Every actionable projectile the engine is tracking, nearest to the brawler
      * first.
      *
@@ -444,6 +463,9 @@ class VisionResult(
         const val SOLUTION_FLOATS = 24
         const val MAX_PROJECTILES = 8
         const val PROJECTILE_FLOATS = 5
+        /** Distinct from NativeVisionEngine.MAX_ENEMIES, which is a debug readback. */
+        const val MAX_ENEMY_MARKS = 4
+        const val ENEMY_FLOATS = 2
     }
 
     /** Frames the engine has processed since the last reset. */
