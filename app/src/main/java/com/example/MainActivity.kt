@@ -69,6 +69,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.data.InstalledAppsRepository
 import com.example.data.RenderaPreferences
+import com.example.vision.AnchorCalibrator
+import com.example.vision.NativeVisionProbe
 import com.example.model.GameAppInfo
 import com.example.service.RenderaAccessibilityService
 import com.example.service.RenderaOverlayService
@@ -114,7 +116,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        prefs = RenderaPreferences(this)
+        prefs = RenderaPreferences.get(this)
         appsRepo = InstalledAppsRepository(this)
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
@@ -182,8 +184,14 @@ class MainActivity : ComponentActivity() {
         var hasAccessibility by remember { mutableStateOf(checkAccessibilityPermission()) }
         var hasMediaProjection by remember { mutableStateOf(screenCaptureResultCode != 0) }
 
-        val profile by prefs.currentProfile.collectAsState()
-        val isDebugOverlayEnabled by prefs.isDebugOverlayEnabled.collectAsState()
+        // Read the flows off the shared singleton so the slider, the in-game
+        // menu and the vision engine can never disagree. The previous code gave
+        // MainActivity and the service their own instances, so writes from one
+        // were invisible to the other until the process restarted.
+        val sensitivity by prefs.sensitivity.collectAsState()
+        val isDebugOverlayEnabled by prefs.debugOverlayEnabled.collectAsState()
+        val anchors by prefs.anchors.collectAsState()
+        val nativeAvailable = remember { NativeVisionProbe.isNativeAvailable() }
         var installedApps by remember { mutableStateOf<List<GameAppInfo>>(emptyList()) }
         var showGameSelectDialog by remember { mutableStateOf(false) }
 
@@ -389,9 +397,9 @@ class MainActivity : ComponentActivity() {
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 InstructionRow(num = "1", text = "Press START and select your target game from the list.")
-                                InstructionRow(num = "2", text = "In-game, tap the floating bubble to calibrate your movement joystick.")
-                                InstructionRow(num = "3", text = "After calibration, a single tap pauses or resumes auto-dodge.")
-                                InstructionRow(num = "4", text = "Long-press the bubble anytime to open the settings menu.")
+                                InstructionRow(num = "2", text = "In-game, long-press the bubble and open CALIBRATE ANCHORS. Tap the playfield to place the joystick, tap your brawler to set the player, then press LOCK & ACTIVATE.")
+                                InstructionRow(num = "3", text = "A single tap on the bubble arms or pauses auto-dodge. Drag the bubble to move it out of the way.")
+                                InstructionRow(num = "4", text = "Rotate the device? The anchors are re-validated, and you re-lock them for the new orientation.")
                             }
                         }
 
@@ -419,7 +427,7 @@ class MainActivity : ComponentActivity() {
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "${(profile.sensitivity * 100).toInt()}%",
+                                        text = "${(sensitivity * 100).toInt()}%",
                                         color = NeonCyan,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold
@@ -427,9 +435,9 @@ class MainActivity : ComponentActivity() {
                                 }
 
                                 Slider(
-                                    value = profile.sensitivity,
+                                    value = sensitivity,
                                     onValueChange = { newVal ->
-                                        prefs.updateSensitivity(newVal)
+                                        prefs.setSensitivity(newVal)
                                     },
                                     valueRange = 0.1f..1.0f,
                                     colors = SliderDefaults.colors(
@@ -501,6 +509,51 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
                                 }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(18.dp))
+
+                        // ENGINE STATUS: this is the single most useful thing to
+                        // surface. A build without the compiled native engine
+                        // cannot detect anything, and the previous UI looked
+                        // perfectly healthy in that state.
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(if (nativeAvailable) Color(0xFF0F3822) else Color(0xFF3A1414))
+                                .border(
+                                    BorderStroke(
+                                        1.dp,
+                                        if (nativeAvailable) SafeGreen else ThreatRed
+                                    ),
+                                    RoundedCornerShape(16.dp)
+                                )
+                                .padding(16.dp)
+                        ) {
+                            Column {
+                                Text(
+                                    text = "VISION ENGINE",
+                                    color = if (nativeAvailable) SafeGreen else ThreatRed,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = NativeVisionProbe.describe(),
+                                    color = Color(0xFFD4C7E6),
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = AnchorCalibrator.describe(anchors),
+                                    color = if (anchors.calibrated) SafeGreen else WarningAmber,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
 

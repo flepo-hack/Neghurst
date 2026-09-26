@@ -6,8 +6,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -16,1270 +14,1434 @@ import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
+import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
-import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.RenderaApp
 import com.example.data.RenderaPreferences
 import com.example.model.DetectionStats
-import com.example.model.DodgeProfile
 import com.example.model.ThreatLevel
-import com.example.model.ThreatVector
-import com.example.ui.components.RenderaDebugHudView
+import com.example.ui.overlay.CalibrationOverlayView
+import com.example.ui.overlay.TacticalHudView
+import com.example.vision.AnchorCalibrator
+import com.example.vision.AnchorTarget
+import com.example.vision.Anchors
 import com.example.vision.ScreenThreatDetector
+import com.example.vision.nativebridge.ScreenRegion
+import com.example.vision.nativebridge.VisionTuning
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 
+/**
+ * Orchestrates the whole system: screen capture, vision, dodging and the
+ * on-screen UI.
+ *
+ * ## The four bugs that made this look completely dead
+ *
+ * 1. **No `MediaProjection.Callback` was ever registered.** From Android 14
+ *    (API 34) onwards, `createVirtualDisplay()` throws `IllegalStateException`
+ *    unless a callback has been registered first. `targetSdk` here is 36, so on
+ *    any modern device the call threw, the `try/catch` swallowed it,
+ *    `virtualDisplay` stayed null, the `ImageReader` never got a producer, and
+ *    `acquireLatestImage()` returned null **forever**. No frames, no detection,
+ *    no auto-calibration, nothing. That is why "auto calib does nothing" and the
+ *    live feed was blank.
+ *
+ * 2. **The capture path was `RGBA_8888` + `Bitmap`.** It discarded three
+ *    quarters of the data it copied, allocated a `Bitmap` every frame, and
+ *    assumed the image plane limit was `rowStride * height` when it is usually
+ *    smaller, so `copyPixelsFromBuffer` threw on real devices. Now `YUV_420_888`
+ *    with a pooled direct-buffer ring. See [YuvFrameRing].
+ *
+ * 3. **The bubble opened the menu instead of toggling.** The long-press runnable
+ *    was posted at 450 ms and only cancelled on `ACTION_UP`, but a *click* also
+ *    opens the menu because `ACTION_CANCEL` returned false and let the touch
+ *    stream be stolen, while the drag threshold was only 12 px on a 62 dp
+ *    bubble, so ordinary finger jitter cancelled the toggle and started a drag.
+ *    Both thresholds are now separate, and the view consumes the entire gesture.
+ *
+ * 4. **The manual calibration never reached the detector.** `LOCK &amp; ACTIVATE`
+ *    wrote the anchors into a preferences object that the vision loop never read,
+ *    and after 25 missed detections the detector replaced the player with a
+ *    hard-coded `0.50 * screenWidth`. Anchors are now a single shared value in
+ *    [RenderaPreferences] that the detector is explicitly told about.
+ *
+ * The dodge gesture itself was fixed in [RenderaAccessibilityService] and
+ * [com.example.vision.DodgeGesturePlanner].
+ */
 class RenderaOverlayService : Service() {
 
     companion object {
-        private const val TAG = "RenderaOverlayService"
-        private const val NOTIFICATION_ID = 1001
+        const val ACTION_START = "com.example.RenderaOverlayService.START"
+        const val ACTION_STOP = "com.example.RenderaOverlayService.STOP"
+        const val ACTION_TOGGLE = "com.example.RenderaOverlayService.TOGGLE"
 
-        const val ACTION_START = "com.example.action.START"
-        const val ACTION_STOP = "com.example.action.STOP"
-        const val EXTRA_RESULT_CODE = "extra_result_code"
-        const val EXTRA_DATA_INTENT = "extra_data_intent"
-        const val EXTRA_GAME_NAME = "extra_game_name"
-        const val EXTRA_PACKAGE_NAME = "extra_package_name"
+        const val EXTRA_RESULT_CODE = "resultCode"
+        const val EXTRA_DATA_INTENT = "dataIntent"
+        const val EXTRA_GAME_NAME = "gameName"
+        const val EXTRA_PACKAGE_NAME = "packageName"
 
-        private val _stats = MutableStateFlow(DetectionStats())
-        val stats: StateFlow<DetectionStats> = _stats.asStateFlow()
+        private const val TAG = "RenderaOverlay"
+        private const val NOTIFICATION_ID = 4711
 
+        /**
+         * Long edge of the captured image, in pixels. The engine downsamples to
+         * its own grid natively, so a larger capture buys no detection accuracy
+         * and only costs bandwidth; 480 is comfortably more than a 160-wide
+         * grid needs to resolve a small projectile. YUV_420_888 requires even
+         * dimensions on both axes.
+         */
+        private const val CAPTURE_LONG_EDGE_EVEN = 480
+
+        private const val VISION_IDLE_SLEEP_MS = 4L
+        private const val STATS_INTERVAL_MS = 1000L
+
+        private const val COLOR_IDLE = 0xCC2A0845
+        private const val COLOR_ARMED = 0xE60F3822
+        private const val COLOR_MENU = 0xF01A0F2E
+
+        @Volatile
         var isRunning = false
             private set
     }
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: RenderaPreferences
-    private lateinit var threatDetector: ScreenThreatDetector
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var visionJob: Job? = null
 
-    private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
-    private var virtualDisplay: VirtualDisplay? = null
+    private var mediaProjectionCallback: MediaProjection.Callback? = null
     private var imageReader: ImageReader? = null
+    private var captureThread: android.os.HandlerThread? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private val frameRing = YuvFrameRing(poolSize = 3)
 
-    // Overlay views
-    enum class BubbleState {
-        READY,
-        PAUSED,
-        DODGING
-    }
+    private var displayWidth = 0
+    private var displayHeight = 0
+    private var displayRotation = 0
+    private var captureWidth = 0
+    private var captureHeight = 0
+    private var captureConfiguredForRotation = -1
 
-    private var currentBubbleState = BubbleState.READY
-    private var floatingBubbleView: View? = null
-    private var bubbleIconView: ImageView? = null
-    private var bubbleLabelView: TextView? = null
-    private var bubbleBgDrawable: android.graphics.drawable.GradientDrawable? = null
-    private var hudMenuView: View? = null
-    private var calibrationOverlayView: View? = null
-    private var debugHudView: RenderaDebugHudView? = null
+    private var bubbleView: View? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+    /** Held so it can be cancelled precisely on teardown. */
+    private var bubbleLongPress: Runnable? = null
+    private var menuView: View? = null
+    private var menuX = 0
+    private var menuY = 0
+    private var hudView: TacticalHudView? = null
+    private var calibrationView: CalibrationOverlayView? = null
 
-    private var screenWidth = 1080
-    private var screenHeight = 2400
-    private var screenDensity = 420
+    private var lastDodgeAtMs = 0L
+    private var lastThreatSignature: FloatArray = FloatArray(0)
 
-    private var lastDodgeTimestamp = 0L
-    private var totalDodges = 0
-    private var totalThreats = 0
-    private var fpsCounter = 0
-    private var lastFpsTimestamp = System.currentTimeMillis()
-    private var activeGame = "Universal"
+    private var statsFrames = 0
+    private var statsWindowStartMs = 0L
 
-    fun showDebugHud() {
-        if (debugHudView != null) return
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
+    // Written from the vision thread, read from the main thread and from logging.
+    @Volatile private var latestFps = 0
+    @Volatile private var latestVisionMillis = 0.0
+    @Volatile private var latestSeverity = ThreatLevel.SAFE
+    @Volatile private var threatCount = 0
+    @Volatile private var dodgeCount = 0
+    @Volatile private var lastDodgeAngleDeg = 0f
 
-        val hudParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        )
+    // The vision thread reads the detector while the main thread creates and
+    // destroys it. Without volatile it can call process() on a closed engine.
+    @Volatile private var detector: ScreenThreatDetector? = null
 
-        val hud = RenderaDebugHudView(this)
-        debugHudView = hud
-        try {
-            windowManager.addView(hud, hudParams)
-            Log.i(TAG, "Rendera Tactical Debug HUD Overlay successfully attached.")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to attach Debug HUD Overlay", e)
-            debugHudView = null
-        }
-    }
+    // Cross-thread, main thread reads it for auto-detect.
+    @Volatile private var latestAnalysis: ScreenThreatDetector.Analysis? = null
 
-    fun removeDebugHud() {
-        debugHudView?.let {
-            try {
-                windowManager.removeView(it)
-                Log.i(TAG, "Rendera Tactical Debug HUD Overlay removed.")
-            } catch (e: Exception) {
-                Log.w(TAG, "Error removing debug HUD view", e)
-            }
-            debugHudView = null
-        }
-    }
+    @Volatile private var autoDodgeArmed = false
+    @Volatile private var anchors: Anchors = Anchors.defaultFor(0, 0)
 
-    fun toggleDebugHud() {
-        val newState = !prefs.isDebugOverlayEnabled.value
-        prefs.setDebugOverlayEnabled(newState)
-        if (newState) {
-            showDebugHud()
-        } else {
-            removeDebugHud()
-        }
-    }
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        prefs = RenderaPreferences(this)
-        threatDetector = ScreenThreatDetector()
-
-        fetchScreenDimensions()
-    }
-
-    private fun fetchScreenDimensions() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        screenDensity = metrics.densityDpi
-    }
-
-    private fun checkAndSyncDisplayMetrics() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        wm.defaultDisplay.getRealMetrics(metrics)
-
-        if (metrics.widthPixels != screenWidth || metrics.heightPixels != screenHeight) {
-            screenWidth = metrics.widthPixels
-            screenHeight = metrics.heightPixels
-            screenDensity = metrics.densityDpi
-            serviceScope.launch(Dispatchers.Main) {
-                recreateVirtualDisplay()
-            }
-        }
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        fetchScreenDimensions()
-        recreateVirtualDisplay()
+        prefs = RenderaPreferences.get(this)
+        isRunning = true
+        statsWindowStartMs = SystemClock.elapsedRealtime()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) return START_NOT_STICKY
-
-        when (intent.action) {
-            ACTION_START -> {
-                val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(EXTRA_DATA_INTENT)
-                }
-                activeGame = intent.getStringExtra(EXTRA_GAME_NAME) ?: "Universal"
-
-                startInForeground()
-                setupMediaProjection(resultCode, data)
-                showFloatingBubble()
-                if (prefs.isDebugOverlayEnabled.value) {
-                    showDebugHud()
-                }
-                startDetectionLoop()
-                isRunning = true
-            }
+        when (intent?.action) {
             ACTION_STOP -> {
+                stopEverything()
                 stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE -> {
+                toggleAutoDodge()
+                return START_NOT_STICKY
+            }
+            else -> {
+                val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+                @Suppress("DEPRECATION")
+                val data: Intent? = intent?.getParcelableExtra(EXTRA_DATA_INTENT)
+                val gameName = intent?.getStringExtra(EXTRA_GAME_NAME) ?: "Universal"
+                val pkg = intent?.getStringExtra(EXTRA_PACKAGE_NAME) ?: ""
+                if (pkg.isNotEmpty() || gameName != "Universal") {
+                    prefs.setTarget(pkg, gameName)
+                }
+                // startForeground MUST precede getMediaProjection() on API 29+.
+                startInForeground()
+                if (setupCapture(resultCode, data)) {
+                    ensureDetector()
+                    if (bubbleView == null) showFloatingBubble()
+                    startVisionLoop()
+                    mainHandler.post { prefs.setAutoDodge(true); autoDodgeArmed = true; refreshBubbleUi() }
+                }
             }
         }
-        return START_STICKY
+        // NOT sticky on purpose. A restarted service is handed a null Intent, so
+        // it has no MediaProjection consent token and could never capture again.
+        // START_STICKY left it stuck in the foreground with a notification, no
+        // bubble and no frames, which looks exactly like a hung app.
+        return START_NOT_STICKY
     }
 
+    override fun onDestroy() {
+        stopEverything()
+        serviceScope.cancel()
+        isRunning = false
+        super.onDestroy()
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Rotation invalidates the capture geometry and, importantly, the
+        // calibration: a stick at (0.17, 0.76) in landscape is not the same
+        // physical location in portrait.
+        mainHandler.post { onGeometryChanged() }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopEverything()
+        stopSelf()
+    }
+
+    private fun stopEverything() {
+        visionJob?.cancel()
+        visionJob = null
+        releaseCapture()
+        synchronized(detectorLock) {
+            detector?.close()
+            detector = null
+        }
+        mainHandler.post {
+            removeCalibrationOverlay()
+            removeHud()
+            removeMenu()
+            removeBubble()
+        }
+        autoDodgeArmed = false
+    }
+
+    // -----------------------------------------------------------------------
+    // Foreground notification
+    // -----------------------------------------------------------------------
+
+    /**
+     * Phase 1 of the foreground handshake: an untyped `startForeground`.
+     *
+     * The ordering rules around `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION` have
+     * shifted across releases, and getting them wrong produces exactly the
+     * symptom this whole file exists to fix: a foreground service with a
+     * notification and no frames. Concretely:
+     *
+     *  * a VirtualDisplay may only be created while the service is in the
+     *    foreground, so a plain `startForeground` must already have happened;
+     *  * the typed variant validates against a live MediaProjection token, whose
+     *    ordering relative to `startForeground` is not stable across API levels.
+     *
+     * Doing the untyped call first and upgrading to the typed one **after** the
+     * token exists satisfies both constraints on every API level this app
+     * supports (24..36). It is deliberately not "clean" enough to collapse into
+     * one call.
+     */
     private fun startInForeground() {
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
+        val notification = buildNotification()
+        // Untyped: always accepted, and satisfies the "foreground before
+        // createVirtualDisplay" requirement.
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * Phase 2: upgrade the service to the media projection type, now that a
+     * MediaProjection token exists. See [startInForeground] for why this is a
+     * separate call.
+     */
+    private fun upgradeForegroundToMediaProjection() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val notification = buildNotification()
+        startForeground(
+            NOTIFICATION_ID, notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        )
+    }
+
+    private fun buildNotification(): Notification {
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
-        val notification: Notification = NotificationCompat.Builder(this, RenderaApp.NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Rendera AI Dodge Active")
-            .setContentText("Monitoring $activeGame: Tracking Green Ring & Joystick")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pendingIntent)
+        return NotificationCompat.Builder(this, RenderaApp.NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(getString(R.string.service_notification_title))
+            .setContentText(getString(R.string.service_notification_desc))
+            .setContentIntent(open)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
     }
 
-    private fun setupMediaProjection(resultCode: Int, data: Intent?) {
-        if (resultCode != 0 && data != null && mediaProjection == null) {
-            try {
-                mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
-                recreateVirtualDisplay()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize MediaProjection", e)
+    // -----------------------------------------------------------------------
+    // Capture
+    // -----------------------------------------------------------------------
+
+    /**
+     * Registers the projection callback, then creates the reader and the virtual
+     * display.
+     *
+     * Order matters and is the single most important thing in this file: from
+     * API 34 the system rejects `createVirtualDisplay()` with
+     * `IllegalStateException` unless `registerCallback()` ran first.
+     */
+    private fun setupCapture(resultCode: Int, data: Intent?): Boolean {
+        if (resultCode == 0 || data == null) {
+            Log.e(TAG, "No MediaProjection consent; vision cannot start")
+            mainHandler.post { toast("Screen capture permission is required") }
+            return false
+        }
+        if (mediaProjection != null) return true
+
+        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val projection = try {
+            mpm.getMediaProjection(resultCode, data)
+        } catch (t: Throwable) {
+            Log.e(TAG, "getMediaProjection failed", t)
+            mainHandler.post { toast("Screen capture could not be started") }
+            return false
+        }
+        if (projection == null) {
+            Log.e(TAG, "getMediaProjection returned null")
+            return false
+        }
+        mediaProjection = projection
+
+        // The token now exists, so the typed foreground call is safe.
+        runCatching { upgradeForegroundToMediaProjection() }
+            .onFailure { Log.w(TAG, "typed foreground upgrade failed", it) }
+
+        resolveDisplayGeometry()
+        computeCaptureSize()
+
+        // 1. Callback FIRST. Without it, createVirtualDisplay throws on API 34+.
+        val callback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.w(TAG, "MediaProjection stopped by the system or the user")
+                mainHandler.post { onProjectionStopped() }
             }
         }
-    }
-
-    private fun recreateVirtualDisplay() {
-        val proj = mediaProjection ?: return
+        mediaProjectionCallback = callback
         try {
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
+            projection.registerCallback(callback, mainHandler)
+        } catch (t: Throwable) {
+            Log.e(TAG, "registerCallback failed", t)
+        }
 
-            val isLandscape = screenWidth > screenHeight
-            // 640x360 for landscape, or 360x640 for portrait
-            val captureWidth = if (isLandscape) 640 else 360
-            val captureHeight = ((screenHeight.toFloat() / screenWidth) * captureWidth).toInt().coerceAtLeast(180)
+        // 2. Reader. YUV_420_888 so we can read the luma plane directly.
+        frameRing.configure(captureWidth, captureHeight)
+        val reader = ImageReader.newInstance(
+            captureWidth, captureHeight, android.graphics.ImageFormat.YUV_420_888, 2
+        )
+        // A dedicated thread for the copy. Registering on the main handler ran
+        // three per-frame memcpys on the UI thread every frame, which is enough
+        // to make the game stutter and the capture drop frames.
+        val thread = HandlerThread("RenderaCapture", android.os.Process.THREAD_PRIORITY_DISPLAY)
+        captureThread = thread
+        thread.start()
+        val captureHandler = Handler(thread.looper)
+        reader.setOnImageAvailableListener({ r: ImageReader ->
+            // Runs on the reader's own handler thread. Copy the planes out and
+            // hand the image straight back; never hold it, it holds a buffer.
+            var image: Image? = null
+            try {
+                image = r.acquireLatestImage()
+                if (image != null) frameRing.publish(image)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Frame acquisition failed", t)
+            } finally {
+                try {
+                    image?.close()
+                } catch (ignored: Throwable) {
+                    // Nothing useful to do; the image is being discarded anyway.
+                }
+            }
+        }, captureHandler)
+        imageReader = reader
 
-            imageReader = ImageReader.newInstance(
+        // 3. Virtual display.
+        virtualDisplay = try {
+            projection.createVirtualDisplay(
+                "RenderaVision",
                 captureWidth,
                 captureHeight,
-                PixelFormat.RGBA_8888,
-                2
-            )
-
-            virtualDisplay = proj.createVirtualDisplay(
-                "RenderaCapture",
-                captureWidth,
-                captureHeight,
-                screenDensity,
+                densityDpi(),
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader?.surface,
+                reader.surface,
                 null,
                 null
             )
-            Log.i(TAG, "VirtualDisplay created: $captureWidth x $captureHeight (isLandscape=$isLandscape)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to recreate VirtualDisplay", e)
+        } catch (t: Throwable) {
+            Log.e(TAG, "createVirtualDisplay failed", t)
+            mainHandler.post { toast("Screen capture could not start (API level)") }
+            null
+        }
+
+        if (virtualDisplay == null) {
+            Log.e(TAG, "virtualDisplay is null; no frames will arrive")
+            releaseCapture()
+            return false
+        }
+
+        Log.i(TAG, "Capture started: ${captureWidth}x$captureHeight, display ${displayWidth}x$displayHeight")
+        return true
+    }
+
+    private fun releaseCapture() {
+        try {
+            virtualDisplay?.release()
+        } catch (t: Throwable) {
+            Log.w(TAG, "virtualDisplay release failed", t)
+        }
+        virtualDisplay = null
+        try {
+            imageReader?.close()
+        } catch (t: Throwable) {
+            Log.w(TAG, "imageReader close failed", t)
+        }
+        imageReader = null
+        try {
+            captureThread?.quitSafely()
+        } catch (t: Throwable) {
+            Log.w(TAG, "capture thread shutdown failed", t)
+        }
+        captureThread = null
+        try {
+            mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
+        } catch (t: Throwable) {
+            Log.w(TAG, "unregisterCallback failed", t)
+        }
+        mediaProjectionCallback = null
+        try {
+            mediaProjection?.stop()
+        } catch (t: Throwable) {
+            Log.w(TAG, "mediaProjection stop failed", t)
+        }
+        mediaProjection = null
+        frameRing.release()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
         }
     }
 
-    private fun updateBubbleUi(state: BubbleState) {
-        currentBubbleState = state
-        val icon = bubbleIconView ?: return
-        val label = bubbleLabelView ?: return
-        val bg = bubbleBgDrawable ?: return
+    private fun onProjectionStopped() {
+        mainHandler.post {
+            toast("Screen capture ended")
+            stopEverything()
+            stopSelf()
+        }
+    }
 
-        when (state) {
-            BubbleState.READY -> {
-                bg.setColor(android.graphics.Color.argb(235, 10, 26, 18))
-                bg.setStroke((3 * resources.displayMetrics.density).toInt(), android.graphics.Color.argb(255, 5, 255, 161))
-                icon.setImageResource(android.R.drawable.ic_menu_compass)
-                icon.setColorFilter(android.graphics.Color.argb(255, 5, 255, 161))
-                label.text = "READY"
-                label.setTextColor(android.graphics.Color.argb(255, 5, 255, 161))
+    private fun densityDpi(): Int {
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay.getRealMetrics(dm)
+        return dm.densityDpi
+    }
+
+    /**
+     * Resolves the real display size *including* rotation, from `DisplayManager`.
+     * `resources.displayMetrics` reports this service's own window, which is
+     * wrong whenever the game is in split screen or freeform.
+     */
+    private fun resolveDisplayGeometry() {
+        try {
+            val dm = getSystemService(DisplayManager::class.java)
+            val display = dm?.getDisplay(DisplayManager.DEFAULT_DISPLAY)
+                ?: dm?.getDisplays()?.firstOrNull()
+            if (display != null) {
+                val p = android.util.Point()
+                display.getRealSize(p)
+                if (p.x > 0 && p.y > 0) {
+                    displayWidth = p.x
+                    displayHeight = p.y
+                }
+                @Suppress("DEPRECATION")
+                displayRotation = display.rotation
             }
-            BubbleState.PAUSED -> {
-                bg.setColor(android.graphics.Color.argb(235, 32, 22, 12))
-                bg.setStroke((3 * resources.displayMetrics.density).toInt(), android.graphics.Color.argb(255, 255, 170, 0))
-                icon.setImageResource(android.R.drawable.ic_media_pause)
-                icon.setColorFilter(android.graphics.Color.argb(255, 255, 170, 0))
-                label.text = "PAUSED"
-                label.setTextColor(android.graphics.Color.argb(255, 255, 170, 0))
+        } catch (t: Throwable) {
+            Log.w(TAG, "DisplayManager lookup failed", t)
+        }
+        if (displayWidth <= 0 || displayHeight <= 0) {
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(dm)
+            displayWidth = dm.widthPixels
+            displayHeight = dm.heightPixels
+        }
+    }
+
+    /**
+     * Capture dimensions keep the display's aspect exactly, so grid coordinates
+     * and screen pixels stay linearly related. The previous code computed
+     * `height = (screenHeight / screenWidth) * captureWidth` and then
+     * round-truncated, which skews the aspect and misplaces every position.
+     */
+    private fun computeCaptureSize() {
+        val (w, h) = if (displayWidth >= displayHeight) {
+            CAPTURE_LONG_EDGE_EVEN to
+                ((CAPTURE_LONG_EDGE_EVEN.toLong() * displayHeight / displayWidth).toInt() and 1.inv())
+                .coerceAtLeast(2)
+        } else {
+            ((CAPTURE_LONG_EDGE_EVEN.toLong() * displayWidth / displayHeight).toInt() and 1.inv())
+                .coerceAtLeast(2) to CAPTURE_LONG_EDGE_EVEN
+        }
+        captureWidth = w
+        captureHeight = h
+        captureConfiguredForRotation = displayRotation
+    }
+
+    private fun onGeometryChanged() {
+        val beforeW = displayWidth
+        val beforeH = displayHeight
+        resolveDisplayGeometry()
+        if (beforeW == displayWidth && beforeH == displayHeight) return
+
+        Log.i(TAG, "Display changed ${beforeW}x$beforeH -> ${displayWidth}x$displayHeight")
+        computeCaptureSize()
+        frameRing.configure(captureWidth, captureHeight)
+
+        // Re-point the existing VirtualDisplay at the new size. Recreating the
+        // whole MediaProjection would need fresh user consent, which is not
+        // something we can ask for from the background.
+        try {
+            virtualDisplay?.resize(captureWidth, captureHeight, densityDpi())
+        } catch (t: Throwable) {
+            Log.w(TAG, "VirtualDisplay resize failed", t)
+        }
+
+        // The calibration is only valid for the geometry it was taken on.
+        anchors = prefs.anchorsFor(displayWidth, displayHeight)
+        detector?.let {
+            synchronized(detectorLock) {
+                it.setDisplaySize(displayWidth, displayHeight)
+                it.setAnchors(anchors)
+                it.reset()
             }
-            BubbleState.DODGING -> {
-                bg.setColor(android.graphics.Color.argb(245, 60, 15, 80))
-                bg.setStroke((4 * resources.displayMetrics.density).toInt(), android.graphics.Color.argb(255, 157, 78, 221))
-                icon.setImageResource(android.R.drawable.ic_menu_send)
-                icon.setColorFilter(android.graphics.Color.WHITE)
-                label.text = "DODGE"
-                label.setTextColor(android.graphics.Color.WHITE)
+        }
+        frameRing.release()
+        frameRing.configure(captureWidth, captureHeight)
+        pushMaskRegions()
+        repositionOverlayViews()
+        calibrationView?.let { view ->
+            view.applyAnchors(anchors)
+            view.setStatus(
+                if (!anchors.calibrated) {
+                    "Screen changed. Re-lock the anchors for this orientation."
+                } else {
+                    "Anchors re-applied to the new screen size."
+                }
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Detector
+    // -----------------------------------------------------------------------
+
+    /**
+     * Guards the native engine.
+     *
+     * The vision thread is inside `process()` (a JNI call) while the main thread
+     * reconfigures the engine from `setAnchors`, `applyTuning`, `setMaskRegions`
+     * and `reset`. Volatile gives visibility but no exclusion, so without this
+     * lock the engine can be reset or re-tuned mid-frame. All the work under it
+     * is a few microseconds of parameter setting, never a long analysis, so
+     * contention is not a concern.
+     */
+    private val detectorLock = Any()
+
+    private fun ensureDetector() {
+        if (detector != null) return
+        if (displayWidth <= 0 || displayHeight <= 0) resolveDisplayGeometry()
+        val (gw, gh) = ScreenThreatDetector.gridForCapture(captureWidth, captureHeight)
+        val d = ScreenThreatDetector(gw, gh, displayWidth, displayHeight)
+        anchors = prefs.anchorsFor(displayWidth, displayHeight)
+        synchronized(detectorLock) {
+            d.setAnchors(anchors)
+            d.applyTuning(tuningFromPrefs())
+            detector = d
+        }
+        pushMaskRegions()
+
+        if (!d.isNativeAvailable) {
+            Log.e(TAG, "Native vision engine is NOT available in this build")
+            mainHandler.post {
+                toast("Vision engine missing from this build; detection is disabled")
+            }
+        } else {
+            Log.i(TAG, "Vision engine ready on a ${gw}x$gh grid for ${displayWidth}x$displayHeight")
+        }
+    }
+
+    private fun tuningFromPrefs(): VisionTuning {
+        val sensitivity = prefs.sensitivity.value
+        // Higher sensitivity means reacting to fainter / smaller motion, which is
+        // exactly a lower noise floor and a lower speed gate.
+        return VisionTuning(
+            diffNoiseFloor = (26f - sensitivity * 12f).roundToInt().coerceIn(10, 26),
+            playerMinGreenScore = 40f + sensitivity * 50f,
+            projectileMinSpeedNorm = 0.30f - sensitivity * 0.14f,
+            projectileMinStraightness = 0.70f - sensitivity * 0.22f,
+            reactionHorizonSec = 0.32f + sensitivity * 0.18f,
+            playerAnchorLocked = anchors.calibrated,
+            playerAnchorX = anchors.playerX,
+            playerAnchorY = anchors.playerY
+        )
+    }
+
+    /**
+     * Tells the engine which parts of the captured image are Rendera's own UI.
+     *
+     * MediaProjection captures every window on the display, including ours, so
+     * without this the bubble, the mini menu and the HUD panel are all detected
+     * as moving objects and the engine dodges at its own overlay.
+     */
+    private fun pushMaskRegions() {
+        val d = detector ?: return
+        if (displayWidth <= 0 || displayHeight <= 0) return
+        val regions = ArrayList<ScreenRegion>(3)
+
+        val bubble = bubbleView
+        val bp = bubbleParams
+        if (bubble != null && bp != null) {
+            val size = if (bubble.width > 0) bubble.width else dp(64f).roundToInt()
+            val half = size * 0.75f
+            regions += ScreenRegion(
+                centerX = (bp.x + size / 2f) / displayWidth,
+                centerY = (bp.y + size / 2f) / displayHeight,
+                halfWidth = half / displayWidth,
+                halfHeight = half / displayHeight
+            )
+        }
+
+        val hud = hudView
+        if (hud != null) {
+            val w = if (hud.width > 0) hud.width else dp(232f).roundToInt()
+            val h = if (hud.height > 0) hud.height else dp(140f).roundToInt()
+            val pad = dp(10f)
+            regions += ScreenRegion(
+                centerX = (displayWidth - w / 2f) / displayWidth,
+                centerY = (h / 2f) / displayHeight,
+                halfWidth = (w / 2f + pad) / displayWidth,
+                halfHeight = (h / 2f + pad) / displayHeight
+            )
+        }
+
+        // The mini menu is a large, bright, animated panel. Unmasked it is the
+        // single most detectable object on screen, so the engine would classify
+        // it as a projectile and dodge at the user's own menu.
+        val menu = menuView
+        if (menu != null) {
+            val w = if (menu.width > 0) menu.width else dp(260f).roundToInt()
+            val h = if (menu.height > 0) menu.height else dp(300f).roundToInt()
+            val pad = dp(8f)
+            regions += ScreenRegion(
+                centerX = (menuX + w / 2f) / displayWidth,
+                centerY = (menuY + h / 2f) / displayHeight,
+                halfWidth = (w / 2f + pad) / displayWidth,
+                halfHeight = (h / 2f + pad) / displayHeight
+            )
+        }
+
+        // While the calibration overlay is up it covers the whole screen, so the
+        // whole screen is masked. Detection is not wanted then anyway; the
+        // overlay is used to place anchors by hand.
+        if (calibrationView != null) {
+            regions += ScreenRegion(0.5f, 0.5f, 0.5f, 0.5f)
+        }
+
+        // The joystick base is deliberately NOT masked: the brawler stands on top
+        // of it, so masking the stick would blind player detection. The stick is
+        // static, so it produces no motion residual anyway once the camera is
+        // compensated. Only genuinely moving overlay pixels are masked above.
+        synchronized(detectorLock) { d.setMaskRegions(regions) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Vision loop
+    // -----------------------------------------------------------------------
+
+    private fun startVisionLoop() {
+        if (visionJob?.isActive == true) return
+        visionJob = serviceScope.launch(Dispatchers.Default) {
+            var lastAnchors: Anchors? = null
+            while (isActive) {
+                val frame = frameRing.take()
+                if (frame == null) {
+                    delay(VISION_IDLE_SLEEP_MS)
+                    continue
+                }
+                try {
+                    val d = detector
+                    if (d != null && frameRing.width > 0) {
+                        // Re-read anchors and tuning when the user changes them,
+                        // without a listener per write.
+                        val liveAnchors = prefs.anchors.value
+                        if (lastAnchors != liveAnchors) {
+                            synchronized(detectorLock) { d.setAnchors(liveAnchors) }
+                            lastAnchors = liveAnchors
+                        }
+
+                        val analysis = synchronized(detectorLock) { d.process(
+                            yPlane = frame.y,
+                            yStride = frame.yStride,
+                            uPlane = frame.u,
+                            vPlane = frame.v,
+                            uvStride = frame.uvStride,
+                            frameWidth = frame.width,
+                            frameHeight = frame.height,
+                            chromaWidth = frame.chromaWidth,
+                            chromaHeight = frame.chromaHeight,
+                            ptsNanos = System.nanoTime(),
+                            screenWidth = displayWidth,
+                            screenHeight = displayHeight,
+                            collectDebug = prefs.debugOverlayEnabled.value
+                        ) }
+                        onAnalysis(analysis, d)
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Vision frame failed", t)
+                } finally {
+                    frame.recycle()
+                    statsFrames++
+                }
+
+                if (SystemClock.elapsedRealtime() - statsWindowStartMs >= STATS_INTERVAL_MS) {
+                    val elapsed = SystemClock.elapsedRealtime() - statsWindowStartMs
+                    latestFps = (statsFrames * 1000L / elapsed).toInt()
+                    statsFrames = 0
+                    statsWindowStartMs = SystemClock.elapsedRealtime()
+                    publishStats()
+                }
             }
         }
     }
+
+    private fun onAnalysis(analysis: ScreenThreatDetector.Analysis?, d: ScreenThreatDetector) {
+        if (analysis == null) return
+        latestAnalysis = analysis
+
+        latestVisionMillis = analysis.processMillis
+        if (analysis.escape.hasThreat) {
+            latestSeverity = analysis.escape.severity
+            threatCount++
+        } else {
+            latestSeverity = ThreatLevel.SAFE
+        }
+        if (autoDodgeArmed && analysis.hasDodgeableThreat && displayWidth > 0) {
+            maybeDodge(analysis, d)
+        }
+        publishHud(analysis, d)
+    }
+
+    private fun maybeDodge(analysis: ScreenThreatDetector.Analysis, d: ScreenThreatDetector) {
+        val cooldown = prefs.dodgeCooldownMs.value
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDodgeAtMs < cooldown) return
+        if (!RenderaAccessibilityService.isAvailable()) return
+
+        // Suppress repeated dodges for the *same* projectile. Without this, one
+        // threat that stays on screen produces a dodge every single frame once
+        // the cooldown expires, which spams the joystick and stops the brawler
+        // from ever reaching safety.
+        val raw = analysis.raw
+        val signature = floatArrayOf(
+            raw.threatTrackId.toFloat(),
+            (raw.timeToImpactSec * 1000f).roundToInt().toFloat()
+        )
+        val sameThreat = lastThreatSignature.size == 2 &&
+            lastThreatSignature[0] == signature[0] &&
+            abs(lastThreatSignature[1] - signature[1]) < 60f
+        if (sameThreat && now - lastDodgeAtMs < cooldown * 2) return
+        lastThreatSignature = signature
+
+        val plan = d.planDodge(analysis, displayWidth, displayHeight)
+        if (plan.isEmpty) {
+            Log.d(TAG, "Dodge suppressed: no usable plan (anchors calibrated=${anchors.calibrated})")
+            return
+        }
+        val accepted = RenderaAccessibilityService.dispatch(plan) { success ->
+            if (success) {
+                lastDodgeAtMs = SystemClock.elapsedRealtime()
+                dodgeCount++
+                lastDodgeAngleDeg = analysis.escape.escapeHeadingDeg
+            }
+        }
+        if (!accepted) {
+            // Do not consume the cooldown on a refusal, so the next frame retries.
+            lastThreatSignature = FloatArray(0)
+            Log.d(TAG, "Dodge not dispatched (gesture busy or service down)")
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stats / HUD
+    // -----------------------------------------------------------------------
+
+    /**
+     * One consolidated health snapshot per second.
+     *
+     * Everything here is measured, not hard coded. The previous version reported
+     * `latencyMs = 0`, `threatsDetected = 0` and `dodgesExecuted = 0` forever,
+     * which is worse than reporting nothing: a dashboard of zeros reads as
+     * "working, nothing happening" rather than "this number was never wired up".
+     */
+    private fun publishStats() {
+        val state = DetectionStats(
+            isRunning = true,
+            fps = latestFps,
+            frameCount = frameRing.consumedCount,
+            droppedFrames = frameRing.droppedCount,
+            threatsDetected = threatCount,
+            dodgesExecuted = dodgeCount,
+            lastDodgeAngleDeg = lastDodgeAngleDeg,
+            lastDodgeTimestamp = lastDodgeAtMs,
+            currentThreatLevel = latestSeverity,
+            visionMillis = lastVisionMillis,
+            nativeVisionAvailable = detector?.isNativeAvailable == true,
+            isJoystickCalibrated = anchors.calibrated,
+            isPlayerCalibrated = anchors.calibrated,
+            anchorsCalibrated = anchors.calibrated,
+            anchorsCalibratedFor = "${anchors.calibratedForWidth}x${anchors.calibratedForHeight}",
+            autoDodgeArmed = autoDodgeArmed,
+            accessibilityReady = RenderaAccessibilityService.isAvailable(),
+            activeGamePackage = prefs.targetPackage.value,
+            latestTacticalAdvice = buildAdvice()
+        )
+        Log.i(TAG, "stats: $state")
+    }
+
+    private fun buildAdvice(): String = when {
+        detector?.isNativeAvailable != true -> "Native vision engine missing from this build."
+        !anchors.calibrated -> "Long press the bubble and lock the anchors."
+        !RenderaAccessibilityService.isAvailable() -> "Enable the Rendera accessibility service."
+        autoDodgeArmed -> "Armed. ${latestFps} fps, ${frameRing.droppedCount} frames dropped."
+        else -> "Paused. Tap the bubble to arm."
+    }
+
+    /**
+     * Builds the HUD snapshot on the vision thread and applies it on the main
+     * thread.
+     *
+     * `invalidate()`, `width` and `height` are all main-thread-only, and this is
+     * called straight from `Dispatchers.Default`. Doing it inline was a
+     * guaranteed `CalledFromWrongThreadException` the moment the HUD was on.
+     */
+    private fun publishHud(analysis: ScreenThreatDetector.Analysis, d: ScreenThreatDetector) {
+        val hud = hudView ?: return
+        if (!prefs.debugOverlayEnabled.value) return
+
+        val currentAnchors = anchors
+        val playerRadius = synchronized(detectorLock) { d.currentTuning() }.playerRadiusNorm * displayWidth
+        val joy = currentAnchors.joystickPx(displayWidth, displayHeight)
+        val dragPx = currentAnchors.joystickRadiusPx(displayWidth)
+        val tracks = d.debugTrackSnapshot()
+        val enemies = d.debugEnemySnapshot()
+        val esc = analysis.escape
+        val hasThreat = analysis.threat != null
+
+        val entities = hud.entitiesFor(
+            playerX = analysis.playerX,
+            playerY = analysis.playerY,
+            playerRadius = playerRadius,
+            playerLocked = analysis.playerDetected,
+            joyX = joy.x,
+            joyY = joy.y,
+            joyRadius = dragPx,
+            tracks = tracks,
+            enemies = enemies,
+            threatX = analysis.raw.threatX,
+            threatY = analysis.raw.threatY,
+            hasThreat = hasThreat,
+            escapeX = joy.x + esc.escapeDirX * dragPx,
+            escapeY = joy.y + esc.escapeDirY * dragPx,
+            hasEscape = hasThreat
+        )
+
+        val snapshot = TacticalHudView.Snapshot(
+            entities = entities,
+            fps = latestFps,
+            visionMillis = analysis.processMillis,
+            droppedFrames = frameRing.droppedCount,
+            playerLocked = analysis.playerDetected,
+            playerFromAnchor = analysis.playerFromAnchor,
+            projectiles = analysis.projectileCount,
+            // Use the Kotlin solver's severity, not the native one. The Kotlin
+            // solve produced the plan that is actually dispatched, so it is the
+            // authoritative answer; reading the native value here could colour
+            // the HUD SAFE while the tti next to it reads 90 ms.
+            threatSeverity = esc.severity.name,
+            timeToImpactMs = esc.timeToImpactMs,
+            escapeHeadingDeg = esc.escapeHeadingDeg,
+            escapeSufficient = esc.escapeIsSufficient,
+            anchorsCalibrated = currentAnchors.calibrated,
+            accessibilityReady = RenderaAccessibilityService.isAvailable(),
+            autoDodgeArmed = autoDodgeArmed,
+            note = buildAdvice()
+        )
+
+        mainHandler.post { hudView?.update(snapshot) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating bubble
+    // -----------------------------------------------------------------------
 
     private fun showFloatingBubble() {
-        if (floatingBubbleView != null) return
-
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
-
+        if (bubbleView != null) return
+        val sizePx = dp(64f).roundToInt()
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            sizePx, sizePx,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 24
-            y = screenHeight / 3
+            x = dp(12f).roundToInt()
+            y = dp(80f).roundToInt()
         }
 
-        val bubble = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            val sizePx = (62 * resources.displayMetrics.density).toInt()
-            layoutParams = LinearLayout.LayoutParams(sizePx, sizePx)
-
-            val bg = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(android.graphics.Color.argb(235, 11, 15, 25))
-                setStroke((3 * resources.displayMetrics.density).toInt(), android.graphics.Color.argb(255, 0, 240, 255))
-            }
-            bubbleBgDrawable = bg
-            background = bg
-
-            val icon = ImageView(this@RenderaOverlayService).apply {
-                setImageResource(android.R.drawable.ic_menu_compass)
-                setColorFilter(android.graphics.Color.argb(255, 0, 240, 255))
-                val iconSize = (24 * resources.displayMetrics.density).toInt()
-                val lp = LinearLayout.LayoutParams(iconSize, iconSize)
-                lp.bottomMargin = (2 * resources.displayMetrics.density).toInt()
-                layoutParams = lp
-            }
-            bubbleIconView = icon
-            addView(icon)
-
-            val label = TextView(this@RenderaOverlayService).apply {
-                text = "READY"
-                textSize = 9f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                setTextColor(android.graphics.Color.argb(255, 5, 255, 161))
-                gravity = Gravity.CENTER
-            }
-            bubbleLabelView = label
-            addView(label)
+            background = roundedBackground(COLOR_IDLE)
+            elevation = dp(8f)
         }
+        val icon = ImageView(this).apply {
+            setImageResource(R.mipmap.ic_launcher)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        val label = TextView(this).apply {
+            text = getString(R.string.bubble_label_paused)
+            setTextColor(0xFF0B0710.toInt())
+            textSize = 8f
+        }
+        root.addView(icon, LinearLayout.LayoutParams(sizePx - dp(14f).roundToInt(), sizePx - dp(26f).roundToInt()))
+        root.addView(label, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        val initialBubbleState = if (prefs.currentProfile.value.autoDodgeEnabled) BubbleState.READY else BubbleState.PAUSED
-        updateBubbleUi(initialBubbleState)
-
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-        var isDrag = false
-        var isLongPressed = false
+        // Touch handling is done here rather than with a click listener so the
+        // three gestures stay distinguishable:
+        //   tap        -> toggle armed
+        //   long press -> open the menu
+        //   drag       -> move the bubble
+        val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
+        val tapSlop = ViewConfiguration.get(this).scaledTouchSlop.toFloat()
+        var downRawX = 0f
+        var downRawY = 0f
+        var downX = 0f
+        var downY = 0f
+        var dragging = false
+        var longFired = false
 
         val longPressRunnable = Runnable {
-            if (!isDrag) {
-                isLongPressed = true
-                triggerHapticFeedback(70L)
-                toggleMiniMenu(params.x, params.y)
+            if (!dragging) {
+                longFired = true
+                triggerHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                // addView while a touch is still being dispatched to the bubble
+                // is re-entrant and can throw on some OEM builds, so defer it.
+                mainHandler.post { openMenu(params.x, params.y) }
             }
         }
 
-        bubble.setOnTouchListener { _, event ->
-            when (event.action) {
+        root.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    isDrag = false
-                    isLongPressed = false
-                    mainHandler.postDelayed(longPressRunnable, 450L)
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    downX = params.x
+                    downY = params.y
+                    dragging = false
+                    longFired = false
+                    mainHandler.postDelayed(longPressRunnable, longPressMs)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - initialTouchX).toInt()
-                    val dy = (event.rawY - initialTouchY).toInt()
-                    if (kotlin.math.abs(dx) > 12 || kotlin.math.abs(dy) > 12) {
-                        isDrag = true
+                    val dx = event.rawX - downRawX
+                    val dy = event.rawY - downRawY
+                    // A real touch slop, not the old 12 px constant: ordinary
+                    // finger jitter on a 64 dp bubble used to exceed 12 px and
+                    // cancel the tap.
+                    if (!dragging && (abs(dx) > tapSlop || abs(dy) > tapSlop)) {
+                        dragging = true
                         mainHandler.removeCallbacks(longPressRunnable)
                     }
-                    if (isDrag) {
-                        params.x = initialX + dx
-                        params.y = initialY + dy
-                        windowManager.updateViewLayout(bubble, params)
+                    if (dragging) {
+                        params.x = (downX + dx).roundToInt()
+                        params.y = (downY + dy).roundToInt()
+                        try {
+                            windowManager.updateViewLayout(root, params)
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "bubble drag update failed", t)
+                        }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     mainHandler.removeCallbacks(longPressRunnable)
-                    if (!isDrag && !isLongPressed) {
-                        triggerHapticFeedback(40L)
-                        toggleAutoDodgeActive()
+                    if (!dragging && !longFired) {
+                        toggleAutoDodge()
                     }
+                    // Always consume UP so the gesture stream is not stolen.
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(longPressRunnable)
-                    false
+                    true
                 }
-                else -> false
+                else -> {
+                    // Multi-touch and anything unmodelled: drop the pending long
+                    // press rather than letting it fire on a stale gesture.
+                    mainHandler.removeCallbacks(longPressRunnable)
+                    true
+                }
             }
         }
 
-        floatingBubbleView = bubble
-        windowManager.addView(bubble, params)
-    }
+        bubbleLongPress = longPressRunnable
 
-    private fun toggleAutoDodgeActive() {
-        if (hudMenuView != null) {
-            removeHudMenu()
-        }
-        val isPaused = (currentBubbleState == BubbleState.PAUSED)
-        if (isPaused) {
-            prefs.setAutoDodge(true)
-            threatDetector.resetTracking()
-            updateBubbleUi(BubbleState.READY)
-            triggerHapticFeedback(50L)
-            android.widget.Toast.makeText(this, "AUTO-DODGE ACTIVE", android.widget.Toast.LENGTH_SHORT).show()
-        } else {
-            prefs.setAutoDodge(false)
-            updateBubbleUi(BubbleState.PAUSED)
-            triggerHapticFeedback(50L)
-            android.widget.Toast.makeText(this, "AUTO-DODGE PAUSED", android.widget.Toast.LENGTH_SHORT).show()
+        try {
+            windowManager.addView(root, params)
+            bubbleView = root
+            bubbleParams = params
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not add the floating bubble", t)
+            mainHandler.post { toast("Overlay permission is required") }
+            stopSelf()
         }
     }
 
-    private fun toggleMiniMenu(bubbleX: Int, bubbleY: Int) {
-        if (hudMenuView != null) {
-            removeHudMenu()
+    private fun refreshBubbleUi() {
+        val view = bubbleView ?: return
+        val params = bubbleParams ?: return
+        val color = if (autoDodgeArmed) COLOR_ARMED else COLOR_IDLE
+        view.background = roundedBackground(color)
+        val label = (view as? LinearLayout)?.getChildAt(1) as? TextView
+        label?.text = getString(
+            if (autoDodgeArmed) R.string.bubble_label_armed else R.string.bubble_label_paused
+        )
+        label?.setTextColor(if (autoDodgeArmed) 0xFF04140A.toInt() else 0xFF0B0710.toInt())
+        view.invalidate()
+        Log.d(TAG, "bubble state armed=$autoDodgeArmed params=$params")
+    }
+
+    private fun removeBubble() {
+        // Cancel only OUR runnable. Wiping the whole main handler queue would
+        // also drop the pending onProjectionStopped and onGeometryChanged
+        // handlers, leaving a service whose projection was revoked stuck in the
+        // foreground forever.
+        bubbleLongPress?.let { mainHandler.removeCallbacks(it) }
+        bubbleView?.let { runCatching { windowManager.removeView(it) } }
+        bubbleView = null
+        bubbleParams = null
+    }
+
+    private fun repositionOverlayViews() {
+        if (displayWidth <= 0 || displayHeight <= 0) return
+        bubbleParams?.let { p ->
+            p.x = p.x.coerceIn(0, (displayWidth - p.width).coerceAtLeast(0))
+            p.y = p.y.coerceIn(0, (displayHeight - p.height).coerceAtLeast(0))
+            bubbleView?.let { v -> runCatching { windowManager.updateViewLayout(v, p) } }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mini menu
+    // -----------------------------------------------------------------------
+
+    private fun toggleAutoDodge() {
+        autoDodgeArmed = !autoDodgeArmed
+        prefs.setAutoDodge(autoDodgeArmed)
+        lastThreatSignature = FloatArray(0)
+        lastDodgeAtMs = 0L
+        triggerHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        mainHandler.post {
+            refreshBubbleUi()
+            toast(if (autoDodgeArmed) "Auto-dodge ARMED" else "Auto-dodge PAUSED")
+        }
+        Log.i(TAG, "auto-dodge armed=$autoDodgeArmed")
+    }
+
+    private fun openMenu(anchorX: Int, anchorY: Int) {
+        if (menuView != null) {
+            closeMenu()
             return
         }
+        val w = dp(260f).roundToInt()
+        val rowH = dp(44f).roundToInt()
 
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground(COLOR_MENU)
+            elevation = dp(12f)
         }
 
+        fun addButton(text: String, onClick: () -> Unit) {
+            val tv = TextView(this).apply {
+                this.text = text
+                setTextColor(0xFFEDE7FF.toInt())
+                textSize = 13f
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14f).roundToInt(), 0, dp(14f).roundToInt(), 0)
+                setOnClickListener {
+                    // Tear down after this dispatch completes, otherwise removing
+                    // a view from inside its own click listener drops the rest of
+                    // the gesture and can throw on OEM builds.
+                    it.post { runClick(onClick) }
+                }
+            }
+            root.addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, rowH))
+        }
+
+        addButton(getString(if (autoDodgeArmed) R.string.menu_pause else R.string.menu_arm)) { toggleAutoDodge() }
+        addButton(getString(R.string.menu_calibrate)) {
+            closeMenu()
+            showCalibrationOverlay()
+        }
+        addButton(getString(R.string.menu_hud)) {
+            prefs.setDebugOverlayEnabled(!prefs.debugOverlayEnabled.value)
+            toggleHud()
+            closeMenu()
+            toast(if (prefs.debugOverlayEnabled.value) "HUD ON" else "HUD OFF")
+        }
+        addButton(getString(R.string.menu_reset_calibration)) {
+            prefs.clearCalibration()
+            anchors = prefs.anchorsFor(displayWidth, displayHeight)
+            synchronized(detectorLock) { detector?.setAnchors(anchors) }
+            closeMenu()
+            toast("Calibration cleared")
+        }
+        addButton(getString(R.string.menu_quit)) {
+            closeMenu()
+            stopEverything()
+            stopSelf()
+        }
+
+        val status = TextView(this).apply {
+            text = buildAdvice()
+            setTextColor(0xFF9C93B8.toInt())
+            textSize = 10f
+            setPadding(dp(14f).roundToInt(), dp(6f).roundToInt(), dp(14f).roundToInt(), dp(6f).roundToInt())
+        }
+        root.addView(
+            status,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
+
         val params = WindowManager.LayoutParams(
-            (290 * resources.displayMetrics.density).toInt(),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            w, LinearLayout.LayoutParams.WRAP_CONTENT, overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (bubbleX + 70 * resources.displayMetrics.density).toInt().coerceAtMost(screenWidth - (300 * resources.displayMetrics.density).toInt())
-            y = bubbleY.coerceAtMost(screenHeight - (400 * resources.displayMetrics.density).toInt())
+            x = anchorX.coerceIn(0, (displayWidth - w).coerceAtLeast(0))
+            y = (anchorY + dp(72f)).coerceIn(0, (displayHeight - dp(400f)).coerceAtLeast(0))
         }
 
-        val menuLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val pad = (16 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
-
-            val bg = android.graphics.drawable.GradientDrawable().apply {
-                setColor(android.graphics.Color.argb(248, 16, 12, 32))
-                cornerRadius = 20 * resources.displayMetrics.density
-                setStroke(2, android.graphics.Color.argb(220, 157, 78, 221))
-            }
-            background = bg
-
-            addView(TextView(this@RenderaOverlayService).apply {
-                text = "RENDERA REAL-TIME RADAR"
-                setTextColor(android.graphics.Color.argb(255, 157, 78, 221))
-                textSize = 14f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER_HORIZONTAL
-            })
-
-            addView(TextView(this@RenderaOverlayService).apply {
-                text = "Target: $activeGame (${if (screenWidth > screenHeight) "Landscape" else "Portrait"})"
-                setTextColor(android.graphics.Color.argb(200, 180, 190, 210))
-                textSize = 11f
-                gravity = Gravity.CENTER_HORIZONTAL
-                setPadding(0, 2, 0, (10 * resources.displayMetrics.density).toInt())
-            })
-
-            val currentProf = prefs.currentProfile.value
-            val sensLabel = TextView(this@RenderaOverlayService).apply {
-                text = "Dodge Sensitivity: ${(currentProf.sensitivity * 100).toInt()}%"
-                setTextColor(android.graphics.Color.WHITE)
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-            }
-            addView(sensLabel)
-
-            val seekBar = android.widget.SeekBar(this@RenderaOverlayService).apply {
-                max = 100
-                progress = (currentProf.sensitivity * 100).toInt().coerceIn(10, 100)
-                setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
-                        if (fromUser) {
-                            val sensVal = progress.coerceIn(10, 100) / 100f
-                            sensLabel.text = "Dodge Sensitivity: $progress%"
-                            prefs.updateSensitivity(sensVal)
-                        }
-                    }
-                    override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
-                    override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {
-                        triggerHapticFeedback(20L)
-                    }
-                })
-            }
-            addView(seekBar)
-
-            // Calibration & Custom Position Overlay
-            val calibBtn = TextView(this@RenderaOverlayService).apply {
-                text = "CALIBRATE JOYSTICK & PLAYER"
-                setTextColor(android.graphics.Color.argb(255, 0, 240, 255))
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                val btnBg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(140, 20, 30, 55))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                    setStroke(1, android.graphics.Color.argb(180, 0, 240, 255))
-                }
-                background = btnBg
-                val p = (10 * resources.displayMetrics.density).toInt()
-                setPadding(p, p, p, p)
-                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                lp.topMargin = (10 * resources.displayMetrics.density).toInt()
-                layoutParams = lp
-                setOnClickListener {
-                    removeHudMenu()
-                    showInteractiveCalibrationOverlay()
-                }
-            }
-            addView(calibBtn)
-
-            // Radar Debug HUD Toggle Button
-            val isHudOn = prefs.isDebugOverlayEnabled.value
-            val hudToggleBtn = TextView(this@RenderaOverlayService).apply {
-                text = if (isHudOn) "RADAR DEBUG HUD: [PÄÄLLÄ]" else "RADAR DEBUG HUD: [POIS]"
-                setTextColor(if (isHudOn) android.graphics.Color.argb(255, 5, 255, 161) else android.graphics.Color.argb(255, 200, 210, 225))
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                val btnBg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(140, 16, 28, 40))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                    setStroke(1, if (isHudOn) android.graphics.Color.argb(200, 5, 255, 161) else android.graphics.Color.argb(120, 100, 120, 140))
-                }
-                background = btnBg
-                val p = (10 * resources.displayMetrics.density).toInt()
-                setPadding(p, p, p, p)
-                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                lp.topMargin = (8 * resources.displayMetrics.density).toInt()
-                layoutParams = lp
-                setOnClickListener {
-                    toggleDebugHud()
-                    removeHudMenu()
-                    triggerHapticFeedback(30L)
-                }
-            }
-            addView(hudToggleBtn)
-
-            // Fast Auto-Detect Button
-            val autoDetectBtn = TextView(this@RenderaOverlayService).apply {
-                text = "SMART AUTO-CALIBRATION"
-                setTextColor(android.graphics.Color.argb(255, 255, 215, 0))
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                val btnBg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(170, 42, 32, 12))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                    setStroke(1, android.graphics.Color.argb(230, 255, 215, 0))
-                }
-                background = btnBg
-                val p = (10 * resources.displayMetrics.density).toInt()
-                setPadding(p, p, p, p)
-                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                lp.topMargin = (8 * resources.displayMetrics.density).toInt()
-                layoutParams = lp
-                setOnClickListener {
-                    removeHudMenu()
-                    runQuickAutoDetect()
-                }
-            }
-            addView(autoDetectBtn)
-
-            // Stop Rendera Button
-            val stopBtn = TextView(this@RenderaOverlayService).apply {
-                text = "STOP RENDERA"
-                setTextColor(android.graphics.Color.WHITE)
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                val btnBg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(220, 220, 38, 38))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                }
-                background = btnBg
-                val p = (10 * resources.displayMetrics.density).toInt()
-                setPadding(p, p, p, p)
-                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                lp.topMargin = (8 * resources.displayMetrics.density).toInt()
-                layoutParams = lp
-                setOnClickListener {
-                    removeHudMenu()
-                    stopSelf()
-                }
-            }
-            addView(stopBtn)
-
-            // Close Menu Button
-            val closeBtn = TextView(this@RenderaOverlayService).apply {
-                text = "CLOSE"
-                setTextColor(android.graphics.Color.argb(200, 160, 170, 190))
-                textSize = 11f
-                gravity = Gravity.CENTER
-                val p = (8 * resources.displayMetrics.density).toInt()
-                setPadding(0, p, 0, 0)
-                setOnClickListener {
-                    removeHudMenu()
-                }
-            }
-            addView(closeBtn)
-        }
-
-        hudMenuView = menuLayout
-        windowManager.addView(menuLayout, params)
-    }
-
-    private fun removeHudMenu() {
-        hudMenuView?.let {
-            try {
-                windowManager.removeView(it)
-            } catch (e: Exception) {
-                // Ignore
-            }
-            hudMenuView = null
+        menuX = params.x
+        menuY = params.y
+        try {
+            windowManager.addView(root, params)
+            menuView = root
+            pushMaskRegions()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not show the menu", t)
         }
     }
 
-    private fun showInteractiveCalibrationOverlay() {
-        if (calibrationOverlayView != null) return
-        removeHudMenu()
-        fetchScreenDimensions()
+    private fun runClick(action: () -> Unit) {
+        try {
+            action()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Menu action failed", t)
+        }
+    }
 
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    private fun closeMenu() {
+        menuView?.let { runCatching { windowManager.removeView(it) } }
+        menuView = null
+        pushMaskRegions()
+    }
+
+    private fun removeMenu() = closeMenu()
+
+    // -----------------------------------------------------------------------
+    // HUD
+    // -----------------------------------------------------------------------
+
+    private fun toggleHud() {
+        if (prefs.debugOverlayEnabled.value) showHud() else removeHud()
+    }
+
+    private fun showHud() {
+        if (hudView != null) return
+        val view = TacticalHudView(this)
+        val w = dp(232f).roundToInt()
+        val params = WindowManager.LayoutParams(
+            w, dp(140f).roundToInt(), overlayWindowType(),
+            // FLAG_NOT_TOUCHABLE is essential: the panel must never steal a
+            // touch from the game.
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(8f).roundToInt()
+            y = dp(8f).roundToInt()
+        }
+        try {
+            windowManager.addView(view, params)
+            hudView = view
+            pushMaskRegions()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not show the HUD", t)
+        }
+    }
+
+    private fun removeHud() {
+        hudView?.let { runCatching { windowManager.removeView(it) } }
+        hudView = null
+    }
+
+    // -----------------------------------------------------------------------
+    // Calibration overlay
+    // -----------------------------------------------------------------------
+
+    private fun showCalibrationOverlay() {
+        if (calibrationView != null) return
+        resolveDisplayGeometry()
+        anchors = prefs.anchorsFor(displayWidth, displayHeight)
+
+        val view = CalibrationOverlayView(
+            context = this,
+            displayWidthPx = displayWidth,
+            displayHeightPx = displayHeight,
+            anchors = anchors,
+            callbacks = object : CalibrationOverlayView.Callbacks {
+                override fun onAnchorMoved(target: AnchorTarget, screenX: Float, screenY: Float) {
+                    val updated = AnchorCalibrator.applyTouch(
+                        anchors = anchors,
+                        target = target,
+                        screenX = screenX,
+                        screenY = screenY,
+                        displayWidth = displayWidth,
+                        displayHeight = displayHeight
+                    )
+                    anchors = updated
+                    view.setStatus(
+                        "${target.name}: ${"%.3f".format(updated.playerX)}, ${"%.3f".format(updated.playerY)}"
+                    )
+                }
+
+                override fun onAutoDetectRequested() {
+                    view.setStatus("Auto-detect needs a live game frame. " +
+                        "Place the brawler on open ground, then press LOCK & ACTIVATE.")
+                    // Honest limitation: auto-detect runs from the live vision
+                    // loop, not from a one-off screenshot, because the player is
+                    // found on the world-anchored aligned frame which needs the
+                    // engine's motion history.
+                    runAutoDetect()
+                }
+
+                override fun onCommitted(committed: Anchors) {
+                    anchors = committed
+                    prefs.setAnchors(committed)
+                    synchronized(detectorLock) {
+                        detector?.setAnchors(committed)
+                        detector?.applyTuning(tuningFromPrefs())
+                    }
+                    pushMaskRegions()
+                    removeCalibrationOverlay()
+                    triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    toast("Anchors locked for ${displayWidth}x$displayHeight")
+                }
+
+                override fun onCancelled() {
+                    removeCalibrationOverlay()
+                }
+
+                override fun onTargetChanged(target: AnchorTarget) {
+                    view.setStatus("Editing $target")
+                }
+            }
+        )
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        )
+        try {
+            windowManager.addView(view, params)
+            calibrationView = view
+            pushMaskRegions()
+            anchorCurrentOverlay(anchors)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not show the calibration overlay", t)
+        }
+    }
+
+    /**
+     * Seeds the calibration from the live detector.
+     *
+     * The old implementation read a single `Bitmap` and, when that read failed,
+     * fell back to hard-coded fractions and then **saved them as if the
+     * calibration had succeeded** while reporting "Calibrated &amp; Active". That
+     * is the "auto calib does nothing" symptom. Here a failure is reported and
+     * the previously committed anchors are left untouched.
+     */
+    private fun runAutoDetect() {
+        val d = detector
+        if (d == null || !d.isNativeAvailable) {
+            mainHandler.post { toast("Vision engine unavailable; auto-detect skipped") }
+            return
+        }
+        val live = latestAnalysis ?: run {
+            mainHandler.post {
+                toast("No analysed frame yet. Play for a second, then retry.")
+            }
+            return
+        }
+        if (!live.playerDetected) {
+            mainHandler.post {
+                toast("Player not found. Put the brawler in the open and retry.")
+            }
+            return
+        }
+        mainHandler.post {
+            val updated = anchors.copy(
+                joystickX = anchors.joystickX,
+                joystickY = anchors.joystickY,
+                playerX = (live.playerX / displayWidth).coerceIn(0.05f, 0.95f),
+                playerY = (live.playerY / displayHeight).coerceIn(0.05f, 0.95f),
+                calibrated = true,
+                calibratedForWidth = displayWidth,
+                calibratedForHeight = displayHeight
+            )
+            anchors = updated
+            calibrationView?.applyAnchors(updated)
+            toast("Player anchor auto-detected")
+        }
+    }
+
+    private fun anchorCurrentOverlay(value: Anchors) {
+        calibrationView?.applyAnchors(value)
+    }
+
+    private fun removeCalibrationOverlay() {
+        calibrationView?.let { runCatching { windowManager.removeView(it) } }
+        calibrationView = null
+        pushMaskRegions()
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    private fun overlayWindowType(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        val overlayParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        )
+    private fun dp(v: Float): Float = v * resources.displayMetrics.density
 
-        val profile = prefs.currentProfile.value
-        val reticleRadiusPx = profile.joystickRadius.coerceAtLeast(120f)
-        val reticleDiameterPx = (reticleRadiusPx * 2).toInt()
-        val playerRadiusPx = 80f
-        val playerDiameterPx = (playerRadiusPx * 2).toInt()
-
-        val isLandscape = screenWidth > screenHeight
-        val defaultJoyX = if (isLandscape) 0.20f * screenWidth else 0.25f * screenWidth
-        val defaultJoyY = if (isLandscape) 0.78f * screenHeight else 0.80f * screenHeight
-        val defaultPlayerX = 0.50f * screenWidth
-        val defaultPlayerY = 0.50f * screenHeight
-
-        var currentJoyX = if (profile.joystickCenterX in 0.05f..0.95f) profile.joystickCenterX * screenWidth else defaultJoyX
-        var currentJoyY = if (profile.joystickCenterY in 0.05f..0.95f) profile.joystickCenterY * screenHeight else defaultJoyY
-        var currentPlayerX = if (profile.playerCenterX in 0.05f..0.95f) profile.playerCenterX * screenWidth else defaultPlayerX
-        var currentPlayerY = if (profile.playerCenterY in 0.05f..0.95f) profile.playerCenterY * screenHeight else defaultPlayerY
-
-        var activeEditMode = "JOYSTICK" // "JOYSTICK" or "PLAYER"
-
-        val rootOverlay = FrameLayout(this).apply {
-            setBackgroundColor(android.graphics.Color.argb(140, 4, 2, 10))
+    private fun roundedBackground(color: Int) =
+        android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(color)
+            setStroke(dp(2f).roundToInt(), 0xFFFFFFFF.toInt())
         }
 
-        // Joystick Reticle Ring (Cyan)
-        val joyRing = FrameLayout(this).apply {
-            val bg = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(android.graphics.Color.argb(70, 0, 240, 255))
-                setStroke(4, android.graphics.Color.argb(255, 0, 240, 255), 10f, 8f)
-            }
-            background = bg
-
-            val cross = TextView(this@RenderaOverlayService).apply {
-                text = "JOYSTICK"
-                textSize = 10f
-                setTextColor(android.graphics.Color.WHITE)
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-            }
-            addView(cross, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        }
-
-        // Player Reticle Ring (Lime Green)
-        val playerRing = FrameLayout(this).apply {
-            val bg = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(android.graphics.Color.argb(80, 5, 255, 161))
-                setStroke(4, android.graphics.Color.argb(255, 5, 255, 161))
-            }
-            background = bg
-
-            val pText = TextView(this@RenderaOverlayService).apply {
-                text = "PLAYER"
-                textSize = 9f
-                setTextColor(android.graphics.Color.WHITE)
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-            }
-            addView(pText, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-        }
-
-        fun updateReticlePositions() {
-            joyRing.translationX = (currentJoyX - reticleRadiusPx).coerceIn(0f, (screenWidth - reticleDiameterPx).toFloat())
-            joyRing.translationY = (currentJoyY - reticleRadiusPx).coerceIn(0f, (screenHeight - reticleDiameterPx).toFloat())
-            playerRing.translationX = (currentPlayerX - playerRadiusPx).coerceIn(0f, (screenWidth - playerDiameterPx).toFloat())
-            playerRing.translationY = (currentPlayerY - playerRadiusPx).coerceIn(0f, (screenHeight - playerDiameterPx).toFloat())
-        }
-
-        // Dedicated Touch Layer covering the background playfield
-        val touchSurface = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-            setOnTouchListener { _, event ->
-                if (event.action == MotionEvent.ACTION_DOWN || event.action == MotionEvent.ACTION_MOVE) {
-                    val tx = event.x
-                    val ty = event.y
-                    if (activeEditMode == "JOYSTICK") {
-                        currentJoyX = tx.coerceIn(reticleRadiusPx, screenWidth - reticleRadiusPx)
-                        currentJoyY = ty.coerceIn(reticleRadiusPx, screenHeight - reticleRadiusPx)
-                    } else {
-                        currentPlayerX = tx.coerceIn(playerRadiusPx, screenWidth - playerRadiusPx)
-                        currentPlayerY = ty.coerceIn(playerRadiusPx, screenHeight - playerRadiusPx)
-                    }
-                    updateReticlePositions()
-                    triggerHapticFeedback(12L)
-                    true
-                } else {
-                    false
-                }
-            }
-        }
-        rootOverlay.addView(touchSurface)
-
-        // Add rings to root
-        rootOverlay.addView(joyRing, FrameLayout.LayoutParams(reticleDiameterPx, reticleDiameterPx))
-        rootOverlay.addView(playerRing, FrameLayout.LayoutParams(playerDiameterPx, playerDiameterPx))
-        updateReticlePositions()
-
-        // Header Instructions & Mode Switcher
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(android.graphics.Color.argb(238, 14, 18, 32))
-            val pad = (12 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
-            val lp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP
-            }
-            layoutParams = lp
-            isClickable = true
-
-            addView(TextView(this@RenderaOverlayService).apply {
-                text = "TARGET CALIBRATION & ANCHORS"
-                setTextColor(android.graphics.Color.argb(255, 0, 240, 255))
-                textSize = 15f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-            })
-
-            val subLabel = TextView(this@RenderaOverlayService).apply {
-                text = "Touch anywhere to move active anchor. Select tab below:"
-                setTextColor(android.graphics.Color.argb(230, 210, 225, 245))
-                textSize = 12f
-                gravity = Gravity.CENTER
-                val topP = (4 * resources.displayMetrics.density).toInt()
-                setPadding(0, topP, 0, (8 * resources.displayMetrics.density).toInt())
-            }
-            addView(subLabel)
-
-            // Switcher buttons
-            val switchRow = LinearLayout(this@RenderaOverlayService).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-
-            val joyTabBtn = TextView(this@RenderaOverlayService).apply {
-                text = "Edit Joystick"
-                setTextColor(android.graphics.Color.BLACK)
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                val bg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(255, 0, 240, 255))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                }
-                background = bg
-                val p = (8 * resources.displayMetrics.density).toInt()
-                setPadding(p * 2, p, p * 2, p)
-            }
-
-            val playerTabBtn = TextView(this@RenderaOverlayService).apply {
-                text = "Edit Player Center"
-                setTextColor(android.graphics.Color.WHITE)
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                val bg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(120, 255, 255, 255))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                }
-                background = bg
-                val p = (8 * resources.displayMetrics.density).toInt()
-                setPadding(p * 2, p, p * 2, p)
-                val slp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                slp.marginStart = (12 * resources.displayMetrics.density).toInt()
-                layoutParams = slp
-            }
-
-            switchRow.addView(joyTabBtn)
-            switchRow.addView(playerTabBtn)
-            addView(switchRow)
-
-            val autoDetectBtn = TextView(this@RenderaOverlayService).apply {
-                text = "SMART AUTO-DETECT (Tunnista peli ruudulta)"
-                setTextColor(android.graphics.Color.argb(255, 255, 215, 0))
-                textSize = 12f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                val bg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(170, 42, 32, 12))
-                    cornerRadius = 12 * resources.displayMetrics.density
-                    setStroke(1, android.graphics.Color.argb(230, 255, 215, 0))
-                }
-                background = bg
-                val p = (8 * resources.displayMetrics.density).toInt()
-                setPadding(p * 2, p, p * 2, p)
-                val adlp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                adlp.topMargin = (10 * resources.displayMetrics.density).toInt()
-                layoutParams = adlp
-                setOnClickListener {
-                    fetchScreenDimensions()
-                    val frame = acquireCurrentFrameBitmap()
-                    val (joy, player) = threatDetector.autoCalibrateFromFrame(
-                        frame = frame ?: Bitmap.createBitmap(screenWidth.coerceAtLeast(10), screenHeight.coerceAtLeast(10), Bitmap.Config.ARGB_8888),
-                        screenWidth = screenWidth,
-                        screenHeight = screenHeight,
-                        activeWidth = activeCaptureWidth,
-                        activeHeight = activeCaptureHeight
-                    )
-                    currentJoyX = joy.first
-                    currentJoyY = joy.second
-                    currentPlayerX = player.first
-                    currentPlayerY = player.second
-                    updateReticlePositions()
-                    subLabel.text = "Detected Joy: (${joy.first.toInt()}, ${joy.second.toInt()}), Player: (${player.first.toInt()}, ${player.second.toInt()})"
-                    triggerHapticFeedback(50L)
-                }
-            }
-            addView(autoDetectBtn)
-
-            joyTabBtn.setOnClickListener {
-                activeEditMode = "JOYSTICK"
-                subLabel.text = "Touch screen to move the JOYSTICK anchor."
-                (joyTabBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(android.graphics.Color.argb(255, 0, 240, 255))
-                joyTabBtn.setTextColor(android.graphics.Color.BLACK)
-                (playerTabBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(android.graphics.Color.argb(120, 255, 255, 255))
-                playerTabBtn.setTextColor(android.graphics.Color.WHITE)
-                triggerHapticFeedback(20L)
-            }
-
-            playerTabBtn.setOnClickListener {
-                activeEditMode = "PLAYER"
-                subLabel.text = "Touch screen to move the DEFAULT PLAYER position."
-                (playerTabBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(android.graphics.Color.argb(255, 5, 255, 161))
-                playerTabBtn.setTextColor(android.graphics.Color.BLACK)
-                (joyTabBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(android.graphics.Color.argb(120, 255, 255, 255))
-                joyTabBtn.setTextColor(android.graphics.Color.WHITE)
-                triggerHapticFeedback(20L)
-            }
-        }
-        rootOverlay.addView(header)
-
-        // Bottom Action Bar: LOCK & ACTIVATE and CANCEL
-        val bottomBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            val lp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                bottomMargin = (30 * resources.displayMetrics.density).toInt()
-            }
-            layoutParams = lp
-            isClickable = true
-
-            // Cancel Button
-            val cancelBtn = TextView(this@RenderaOverlayService).apply {
-                text = "CANCEL"
-                setTextColor(android.graphics.Color.WHITE)
-                textSize = 13f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                val bg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(180, 50, 50, 60))
-                    cornerRadius = 16 * resources.displayMetrics.density
-                }
-                background = bg
-                val p = (12 * resources.displayMetrics.density).toInt()
-                setPadding(p * 2, p, p * 2, p)
-                setOnClickListener {
-                    removeCalibrationOverlay()
-                }
-            }
-            addView(cancelBtn)
-
-            // Save Button
-            val saveBtn = TextView(this@RenderaOverlayService).apply {
-                text = "LOCK & ACTIVATE (READY)"
-                setTextColor(android.graphics.Color.BLACK)
-                textSize = 13f
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-                gravity = Gravity.CENTER
-                val btnBg = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.argb(255, 5, 255, 161))
-                    cornerRadius = 16 * resources.displayMetrics.density
-                }
-                background = btnBg
-                val p = (12 * resources.displayMetrics.density).toInt()
-                setPadding(p * 2, p, p * 2, p)
-                val blp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    marginStart = (14 * resources.displayMetrics.density).toInt()
-                }
-                layoutParams = blp
-                setOnClickListener {
-                    fetchScreenDimensions()
-                    val normJoyX = (currentJoyX / screenWidth.toFloat()).coerceIn(0.05f, 0.95f)
-                    val normJoyY = (currentJoyY / screenHeight.toFloat()).coerceIn(0.05f, 0.95f)
-                    val normPlayerX = (currentPlayerX / screenWidth.toFloat()).coerceIn(0.05f, 0.95f)
-                    val normPlayerY = (currentPlayerY / screenHeight.toFloat()).coerceIn(0.05f, 0.95f)
-
-                    prefs.updateJoystickCalibration(normJoyX, normJoyY, reticleRadiusPx)
-                    prefs.updatePlayerCalibration(normPlayerX, normPlayerY)
-                    threatDetector.setManualJoystickCalibration(currentJoyX, currentJoyY)
-                    threatDetector.setManualPlayerCalibration(currentPlayerX, currentPlayerY)
-                    prefs.setAutoDodge(true)
-                    threatDetector.resetTracking()
-
-                    triggerHapticFeedback(70L)
-                    removeCalibrationOverlay()
-                    updateBubbleUi(BubbleState.READY)
-                    android.widget.Toast.makeText(
-                        this@RenderaOverlayService,
-                        "CALIBRATION SAVED & ACTIVE! Joy: (${currentJoyX.toInt()}, ${currentJoyY.toInt()})",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-            addView(saveBtn)
-        }
-        rootOverlay.addView(bottomBar)
-
-        calibrationOverlayView = rootOverlay
-        windowManager.addView(rootOverlay, overlayParams)
-        triggerHapticFeedback(40L)
-    }
-
-    private fun removeCalibrationOverlay() {
-        calibrationOverlayView?.let {
-            try {
-                windowManager.removeView(it)
-            } catch (e: Exception) {
-                // Ignore
-            }
-            calibrationOverlayView = null
-        }
-    }
-
-    private fun runQuickAutoDetect() {
-        fetchScreenDimensions()
-        val latestBitmap = acquireCurrentFrameBitmap()
-        val (joy, player) = threatDetector.autoCalibrateFromFrame(
-            frame = latestBitmap ?: Bitmap.createBitmap(screenWidth.coerceAtLeast(10), screenHeight.coerceAtLeast(10), Bitmap.Config.ARGB_8888),
-            screenWidth = screenWidth,
-            screenHeight = screenHeight,
-            activeWidth = activeCaptureWidth,
-            activeHeight = activeCaptureHeight
-        )
-        val normJoyX = (joy.first / screenWidth.toFloat()).coerceIn(0.05f, 0.95f)
-        val normJoyY = (joy.second / screenHeight.toFloat()).coerceIn(0.05f, 0.95f)
-        val normPlayerX = (player.first / screenWidth.toFloat()).coerceIn(0.05f, 0.95f)
-        val normPlayerY = (player.second / screenHeight.toFloat()).coerceIn(0.05f, 0.95f)
-
-        prefs.updateJoystickCalibration(normJoyX, normJoyY, 140f)
-        prefs.updatePlayerCalibration(normPlayerX, normPlayerY)
-        threatDetector.setManualJoystickCalibration(joy.first, joy.second)
-        threatDetector.setManualPlayerCalibration(player.first, player.second)
-        prefs.setAutoDodge(true)
-        threatDetector.resetTracking()
-        updateBubbleUi(BubbleState.READY)
-
-        triggerHapticFeedback(70L)
-        android.widget.Toast.makeText(
-            this@RenderaOverlayService,
-            "Calibrated & Active: Joy (${joy.first.toInt()}, ${joy.second.toInt()}), Player (${player.first.toInt()}, ${player.second.toInt()})",
-            android.widget.Toast.LENGTH_SHORT
-        ).show()
-    }
-
-    private fun startDetectionLoop() {
-        serviceScope.launch(Dispatchers.Default) {
-            while (isActive) {
-                val loopStartTime = System.currentTimeMillis()
-                val profile = prefs.currentProfile.value
-
-                checkAndSyncDisplayMetrics()
-
-                val shouldAnalyze = (profile.autoDodgeEnabled && currentBubbleState != BubbleState.PAUSED) || (debugHudView != null)
-
-                if (shouldAnalyze) {
-                    val frameBitmap = acquireCurrentFrameBitmap()
-                    if (frameBitmap != null) {
-                        val result = threatDetector.analyzeFrame(
-                            frame = frameBitmap,
-                            profile = profile,
-                            screenWidth = screenWidth,
-                            screenHeight = screenHeight,
-                            activeWidth = activeCaptureWidth,
-                            activeHeight = activeCaptureHeight
-                        )
-
-                        if (result != null) {
-                            val threat = result.threat
-                            if (profile.autoDodgeEnabled && currentBubbleState != BubbleState.PAUSED) {
-                                if (threat != null && (threat.threatLevel == ThreatLevel.IMMINENT_DANGER || threat.threatLevel == ThreatLevel.LETHAL)) {
-                                    totalThreats++
-                                    executeAutoDodge(threat, profile, result.joystickX, result.joystickY)
-                                }
-                            }
-
-                            val loopElapsed = (System.currentTimeMillis() - loopStartTime)
-                            val isAccActive = RenderaAccessibilityService.isAvailable()
-                            debugHudView?.updateAnalysis(
-                                result = result,
-                                fps = if (fpsCounter > 0) fpsCounter else 60,
-                                latencyMs = loopElapsed,
-                                isAccessibilityActive = isAccActive,
-                                isAutoDodgeEnabled = (profile.autoDodgeEnabled && currentBubbleState != BubbleState.PAUSED)
-                            )
-
-                            fpsCounter++
-                            val now = System.currentTimeMillis()
-                            if (now - lastFpsTimestamp >= 1000L) {
-                                val currentFps = fpsCounter
-                                fpsCounter = 0
-                                lastFpsTimestamp = now
-
-                                val statusAdvice = if (result.isPlayerGreenRingTracked) {
-                                    "[LOCKED] Player @ (${result.playerX.toInt()}, ${result.playerY.toInt()}) | Joy: (${result.joystickX.toInt()}, ${result.joystickY.toInt()})"
-                                } else {
-                                    "[TRACKING] Center @ (${result.playerX.toInt()}, ${result.playerY.toInt()}) | Joy: (${result.joystickX.toInt()}, ${result.joystickY.toInt()})"
-                                }
-
-                                _stats.value = _stats.value.copy(
-                                    isRunning = true,
-                                    fps = currentFps,
-                                    threatsDetected = totalThreats,
-                                    dodgesExecuted = totalDodges,
-                                    currentThreatLevel = threat?.threatLevel ?: ThreatLevel.SAFE,
-                                    latencyMs = (now - loopStartTime),
-                                    isJoystickCalibrated = result.isJoystickTracked,
-                                    isPlayerCalibrated = result.isPlayerGreenRingTracked,
-                                    activeGamePackage = activeGame,
-                                    latestTacticalAdvice = statusAdvice
-                                )
-                            }
-                        }
-                    }
-                }
-
-                delay(16L) // ~60 FPS scan loop
-            }
-        }
-    }
-
-    private var reusableBitmap: Bitmap? = null
-    private var activeCaptureWidth: Int = 640
-    private var activeCaptureHeight: Int = 360
-
-    private fun acquireCurrentFrameBitmap(): Bitmap? {
-        val reader = imageReader ?: return null
-        var image: Image? = null
-        return try {
-            image = reader.acquireLatestImage() ?: return null
-            val planes = image.planes
-            val buffer: ByteBuffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * image.width
-
-            activeCaptureWidth = image.width
-            activeCaptureHeight = image.height
-
-            val targetWidth = image.width + rowPadding / pixelStride
-            val targetHeight = image.height
-
-            var bmp = reusableBitmap
-            if (bmp == null || bmp.width != targetWidth || bmp.height != targetHeight || bmp.isRecycled) {
-                bmp = Bitmap.createBitmap(
-                    targetWidth,
-                    targetHeight,
-                    Bitmap.Config.ARGB_8888
-                )
-                reusableBitmap = bmp
-            }
-            buffer.rewind()
-            bmp.copyPixelsFromBuffer(buffer)
-            bmp
-        } catch (e: Exception) {
-            null
-        } finally {
-            image?.close()
-        }
-    }
-
-    private fun executeAutoDodge(
-        threat: ThreatVector,
-        profile: DodgeProfile,
-        joyCenterX: Float,
-        joyCenterY: Float
-    ) {
-        val now = System.currentTimeMillis()
-        if (now - lastDodgeTimestamp < profile.dodgeCooldownMs) {
-            return
-        }
-        lastDodgeTimestamp = now
-
-        // Calculate stroke displacement from dynamic joystick anchor
-        val strokeDistance = profile.joystickRadius * profile.dodgeDistanceFactor
-        val targetX = (joyCenterX + threat.dodgeDirX * strokeDistance).coerceIn(10f, screenWidth - 10f)
-        val targetY = (joyCenterY + threat.dodgeDirY * strokeDistance).coerceIn(10f, screenHeight - 10f)
-
-        val success = RenderaAccessibilityService.executeDodgeGesture(
-            startX = joyCenterX,
-            startY = joyCenterY,
-            endX = targetX,
-            endY = targetY,
-            durationMs = 15L // 15ms ultra-fast dynamic dodge stroke
-        ) { completed ->
-            if (completed) {
-                totalDodges++
-                _stats.value = _stats.value.copy(
-                    dodgesExecuted = totalDodges,
-                    lastDodgeAngleDeg = threat.dodgeAngleDeg,
-                    lastDodgeTimestamp = System.currentTimeMillis()
-                )
-            }
-        }
-
-        if (success) {
-            serviceScope.launch(Dispatchers.Main) {
-                updateBubbleUi(BubbleState.DODGING)
-                delay(220L)
-                val currentProfile = prefs.currentProfile.value
-                val nextState = if (currentProfile.autoDodgeEnabled) BubbleState.READY else BubbleState.PAUSED
-                updateBubbleUi(nextState)
-            }
-            if (profile.soundHapticEnabled) {
-                triggerHapticFeedback(60L)
-            }
-        }
-    }
-
-    private fun triggerHapticFeedback(durationMs: Long) {
+    private fun triggerHapticFeedback(constants: Int) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                vibratorManager.defaultVibrator.vibrate(
-                    VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE)
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    vibrator.vibrate(durationMs)
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
+            bubbleView?.performHapticFeedback(constants)
+        } catch (t: Throwable) {
+            Log.w(TAG, "haptic feedback failed", t)
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        isRunning = false
-        serviceScope.cancel()
-
-        removeCalibrationOverlay()
-        removeHudMenu()
-        removeDebugHud()
-
-        floatingBubbleView?.let {
-            try {
-                windowManager.removeView(it)
-            } catch (e: Exception) {
-                // Ignore
-            }
-            floatingBubbleView = null
+    private fun toast(message: String) {
+        try {
+            Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Log.w(TAG, "toast failed", t)
         }
-
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        mediaProjection?.stop()
-        mediaProjection = null
-
-        _stats.value = DetectionStats()
-        Log.i(TAG, "RenderaOverlayService stopped and destroyed.")
     }
+
 }

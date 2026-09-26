@@ -1,6 +1,18 @@
 <resources>
     <string name="app_name">Rendera</string>
-    <string name="accessibility_service_description">Rendera Accessibility Service enables automated high-speed tactical joystick gestures and dodge assistance in games.</string>
-    <string name="service_notification_title">Rendera AI Vision Active</string>
-    <string name="service_notification_desc">Screen reading and tactical auto-dodge monitor running.</string>
+
+    <string name="accessibility_service_description">Rendera Accessibility Service dispatches the virtual-joystick press, drag, hold and release gestures used to move your brawler out of the way of incoming projectiles. It does not read or log screen content.</string>
+
+    <string name="service_notification_title">Rendera Vision Active</string>
+    <string name="service_notification_desc">Reading the game screen and executing dodge gestures.</string>
+
+    <string name="bubble_label_armed">ARMED</string>
+    <string name="bubble_label_paused">PAUSED</string>
+
+    <string name="menu_arm">ARM AUTO-DODGE</string>
+    <string name="menu_pause">PAUSE AUTO-DODGE</string>
+    <string name="menu_calibrate">CALIBRATE ANCHORS</string>
+    <string name="menu_hud">TOGGLE DEBUG HUD</string>
+    <string name="menu_reset_calibration">RESET CALIBRATION</string>
+    <string name="menu_quit">STOP RENDERA</string>
 </resources>
