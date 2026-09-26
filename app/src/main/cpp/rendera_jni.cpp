@@ -323,8 +323,8 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
     // Nearest to the BRAWLER, not to the screen origin. Sorting by x^2 + y^2
     // alone keeps whichever tracks happen to be near the top-left corner, which
     // is usually the opposite end of the arena from the shots that matter.
-    const float px = engine->player().x;
-    const float py = engine->player().y;
+    const float px = e->player().x;
+    const float py = e->player().y;
     std::sort(actionable.begin(), actionable.end(),
               [px, py](const rendera::Track* a, const rendera::Track* b) {
                   const float da = (a->x - px) * (a->x - px) + (a->y - py) * (a->y - py);
@@ -343,7 +343,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
         f[o + 1] = t.y;
         f[o + 2] = t.vx;
         f[o + 3] = t.vy;
-        f[o + 4] = t.speed;
+        f[o + 4] = t.speedNorm * e->screenWidthForReport();
     }
 
     if (outF != nullptr && env->GetArrayLength(outF) >= kOutFloatCount) {

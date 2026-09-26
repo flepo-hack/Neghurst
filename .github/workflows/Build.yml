@@ -56,6 +56,12 @@ jobs:
       - name: Tarkista JNI-allekirjoitukset
         run: python3 .github/scripts/check_jni.py
 
+      # Catches wrong member and alias names, which clang only reports after a
+      # full NDK configure and compile, and only for the first translation unit
+      # it reaches. A real build break of exactly this kind shipped unnoticed.
+      - name: Tarkista C++-jäsenten nimet
+        run: python3 .github/scripts/check_cpp.py
+
       - name: Tarkista että jokainen .cpp pääsee CMakeLists:iin
         run: |
           set -euo pipefail

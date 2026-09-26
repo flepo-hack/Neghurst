@@ -407,6 +407,17 @@ public:
     // Map a screen pixel coordinate onto the internal grid.
     void screenToGrid(float sx, float sy, float& gx, float& gy) const;
 
+    /**
+     * The screen width this engine is producing coordinates in.
+     *
+     * Exposed because speeds live in the tracker as a normalised value (screen
+     * widths per second, which is resolution independent and therefore the right
+     * thing to filter on) but every speed that crosses the JNI boundary is in
+     * pixels per second, to match the other velocities. The bridge must not reach
+     * into a private field to do the conversion.
+     */
+    float screenWidthForReport() const { return static_cast<float>(screenW_); }
+
 private:
     // --- stages ---
     void downsampleFromYuv(const uint8_t* y, int yStride,
