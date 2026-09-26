@@ -46,6 +46,16 @@ WARN_PATTERNS = [
     re.compile(r"^\s*\d+ tests? completed"),
 ]
 
+# Gradle phrases the cause several ways depending on whether the failure is at
+# configuration time, at task execution, or in a dependency.
+EXTRA_ERROR = re.compile(
+    r"(What went wrong|A problem occurred|Could not |Unable to |No matching|"
+    r"Cannot find|Could not resolve|Configuration .* failed|Plugin .* was not found|"
+    r"Minimum supported Gradle|Unsupported class file|OutOfMemory|"
+    r"Timeout waiting|Process .* completed with non-zero)",
+    re.I,
+)
+
 # Noise that buries the signal in a wall of identical lines.
 SKIP = re.compile(
     r"(Daemon will be stopped|Calculating task graph|To honour the JVM settings|"
@@ -80,7 +90,7 @@ def main(path: str) -> int:
         if len(seen) > 400:
             break
         for pat in ERROR_PATTERNS:
-            if pat.search(line):
+            if pat.search(line) or EXTRA_ERROR.search(line):
                 key = line.strip()[:200]
                 if key in seen:
                     break
@@ -97,15 +107,12 @@ def main(path: str) -> int:
                         emit("warning", line)
                     break
 
-    if errors == 0:
-        # Nothing matched, so the log is the only evidence. Emit the tail; a
-        # reader needs the last screen, which is where Gradle puts the reason.
-        emit("error", "no known error pattern matched; dumping the tail of the log")
-        for line in lines[-60:]:
-            if line.strip():
-                emit("warning", line)
-    else:
-        emit("notice", f"{errors} error line(s) reported")
+    # ALWAYS emit the tail as well. A single matched phrase is not enough to act
+    # on: the first version emitted one line ("FAILURE: Build failed with an
+    # exception") and said nothing, because the reason is the block under it.
+    emit("notice", f"{errors} matched error line(s); tail follows")
+    for line in [l for l in lines[-70:] if l.strip()]:
+        emit("warning", line)
     return 0
 
 
