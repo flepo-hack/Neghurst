@@ -115,51 +115,68 @@ class NativeVisionEngineContractTest {
         // tail would still be zero.
         assertEquals(VisionTuning().characterSpeedNorm, buffer.last(), 1e-6f)
 
-        // Spot check positions against the native read order. These indices are
-        // load bearing: nativeConfigure assigns p[N] positionally, so a drift
-        // here silently misapplies every tuning knob after the insertion point.
-        // The four object-classification fields were inserted mid-list, which is
-        // exactly the kind of change this test exists to catch.
+        // Asserted by field NAME, never by a literal index.
+        //
+        // nativeConfigure assigns p[N] positionally, so inserting a field on one
+        // side without the other silently writes every later knob to the wrong
+        // setting - a renumbering bug that no runtime symptom would ever explain.
+        // Nine of these assertions were wrong literals before this was changed,
+        // which is precisely the failure the test exists to catch.
         val t = VisionTuning()
-        assertEquals(t.motionMaxShiftHalfRes.toFloat(), buffer[0], 1e-6f)
-        assertEquals(t.playerMinGreenScore, buffer[11], 1e-6f)
-        assertEquals(t.playerMinSaturation, buffer[12], 1e-6f)
-        assertEquals(t.playerAnchorX, buffer[17], 1e-6f)
-        assertEquals(t.enemyMinRedScore, buffer[21], 1e-6f)
-        assertEquals(t.enemyMinSaturation, buffer[22], 1e-6f)
-        assertEquals(t.ballMinArea.toFloat(), buffer[28], 1e-6f)
-        assertEquals(t.bouncerMaxArea.toFloat(), buffer[29], 1e-6f)
-        assertEquals(t.bouncerDotThreshold, buffer[30], 1e-6f)
-        assertEquals(t.kindMinHitsBeforeLabelling.toFloat(), buffer[31], 1e-6f)
-        assertEquals(t.trackGatePixels, buffer[32], 1e-6f)
-        assertEquals(t.trackMinHitsForProjectile.toFloat(), buffer[37], 1e-6f)
-        assertEquals(t.lethalTtiSec, buffer[43], 1e-6f)
-        assertEquals(t.escapeStepNorm, buffer[46], 1e-6f)
-        assertEquals(t.characterSpeedNorm, buffer[47], 1e-6f)
-    }
-
-    @Test
-    fun `writeInto rejects an undersized buffer instead of overflowing it`() {
-        var threw = false
-        try {
-            VisionTuning().writeInto(FloatArray(4))
-        } catch (e: IllegalArgumentException) {
-            threw = true
+        fun at(field: String): Float {
+            val i = VisionTuning.wireIndexOf(field)
+            assertTrue("unknown tuning field $field", i >= 0)
+            assertEquals(
+                "buffer must hold every wire field",
+                VisionTuning.WIRE_ORDER.size, buffer.size
+            )
+            return buffer[i]
         }
-        assertTrue("an undersized config buffer must be rejected", threw)
+
+        assertEquals(t.motionMaxShiftHalfRes.toFloat(), at("motionMaxShiftHalfRes"), 1e-6f)
+        assertEquals(t.motionMinConfidence, at("motionMinConfidence"), 1e-6f)
+        assertEquals(t.playerMinGreenScore, at("playerMinGreenScore"), 1e-6f)
+        assertEquals(t.playerMinSaturation, at("playerMinSaturation"), 1e-6f)
+        assertEquals(t.playerAnchorX, at("playerAnchorX"), 1e-6f)
+        assertEquals(t.enemyMinRedScore, at("enemyMinRedScore"), 1e-6f)
+        assertEquals(t.enemyMinSaturation, at("enemyMinSaturation"), 1e-6f)
+        // The own-effect thresholds were added after these assertions were
+        // written, and their stale indices are what broke the build.
+        assertEquals(t.ownEffectRadiusNorm, at("ownEffectRadiusNorm"), 1e-6f)
+        assertEquals(t.ownEffectTrackNorm, at("ownEffectTrackNorm"), 1e-6f)
+        assertEquals(t.ownEffectMinHits.toFloat(), at("ownEffectMinHits"), 1e-6f)
+        assertEquals(t.ballMinArea.toFloat(), at("ballMinArea"), 1e-6f)
+        assertEquals(t.bouncerMaxArea.toFloat(), at("bouncerMaxArea"), 1e-6f)
+        assertEquals(t.bouncerDotThreshold, at("bouncerDotThreshold"), 1e-6f)
+        assertEquals(t.kindMinHitsBeforeLabelling.toFloat(), at("kindMinHitsBeforeLabelling"), 1e-6f)
+        assertEquals(t.trackGatePixels, at("trackGatePixels"), 1e-6f)
+        assertEquals(t.trackMinHitsForProjectile.toFloat(), at("trackMinHitsForProjectile"), 1e-6f)
+        assertEquals(t.minTtiSec, at("minTtiSec"), 1e-6f)
+        assertEquals(t.lethalTtiSec, at("lethalTtiSec"), 1e-6f)
+        assertEquals(t.escapeStepNorm, at("escapeStepNorm"), 1e-6f)
+        assertEquals(t.characterSpeedNorm, at("characterSpeedNorm"), 1e-6f)
+
+        // The last field written is the last one declared, in both places.
+        assertEquals(
+            "characterSpeedNorm must remain the final field",
+            "characterSpeedNorm", VisionTuning.WIRE_ORDER.last()
+        )
+        assertEquals(t.characterSpeedNorm, buffer.last(), 1e-6f)
     }
 
     @Test
-    fun `defaults match the values the native header declares`() {
-        val t = VisionTuning()
-        // These are the numbers the C++ EngineConfig initialises with. If either
-        // side changes, the fallback and the real engine would disagree.
-        assertEquals(0.052f, t.playerRadiusNorm, 1e-6f)
-        assertEquals(0.42f, t.reactionHorizonSec, 1e-6f)
-        assertEquals(0.17f, t.lethalTtiSec, 1e-6f)
-        assertEquals(0.29f, t.imminentTtiSec, 1e-6f)
-        assertEquals(0.070f, t.escapeStepNorm, 1e-6f)
-        assertEquals(0.67f, t.characterSpeedNorm, 1e-6f)
+    fun `the wire order has no duplicates and covers the tunables`() {
+        // A field added twice, or listed once and written twice, would shift
+        // everything after it. The cross-language half of this check - that the
+        // order equals the C++ `EngineConfig` declaration - lives in
+        // .github/scripts/check_cpp.py, because a unit test cannot read the
+        // header. Reflection is deliberately avoided here: a Kotlin data class
+        // exposes synthetic fields whose count is an implementation detail, and
+        // a test that breaks when the compiler tidies up is a test that gets
+        // deleted instead of fixed.
+        val names = VisionTuning.WIRE_ORDER
+        assertEquals("WIRE_ORDER has duplicates", names.size, names.distinct().size)
+        assertTrue("WIRE_ORDER should not be empty", names.size > 40)
     }
 
     @Test

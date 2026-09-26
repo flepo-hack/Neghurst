@@ -143,6 +143,40 @@ def main() -> int:
     members_of = parse_header(strip_comments_and_strings(header))
     findings: list[str] = []
 
+    # --- 0. the Kotlin tuning wire order must match the C++ declaration order ---
+    kt = pathlib.Path(
+        "app/src/main/java/com/example/vision/nativebridge/VisionTypes.kt"
+    )
+    if kt.exists():
+        st = re.search(r"struct EngineConfig \{", header).end()
+        cpp_order = [
+            n
+            for _, n in re.findall(
+                r"^[ \t]+(int|float|bool|uint8_t)[ \t]+(\w+)[ \t]*=",
+                header[st : header.index("\n};", st)],
+                re.M,
+            )
+            if n not in ("gridW", "gridH")
+        ]
+        m = re.search(r"val WIRE_ORDER:\s*List<String>\s*=\s*listOf\((.*?)\n\s*\)", kt.read_text(), re.S)
+        if not m:
+            findings.append(f"{kt}: WIRE_ORDER is missing")
+        else:
+            kt_order = re.findall(r'"(\w+)"', m.group(1))
+            if kt_order != cpp_order:
+                findings.append(
+                    f"{kt}: WIRE_ORDER does not match the C++ EngineConfig order. "
+                    f"nativeConfigure assigns positionally, so every field after the "
+                    f"first divergence is written to the wrong knob. "
+                    f"{len(kt_order)} vs {len(cpp_order)} fields."
+                )
+                for i, (a, b) in enumerate(zip(cpp_order, kt_order)):
+                    if a != b:
+                        findings.append(f"    index {i}: C++ {a} vs Kotlin {b}")
+                        break
+            else:
+                print(f"OK: WIRE_ORDER matches EngineConfig ({len(cpp_order)} fields).")
+
     for path in sorted(CPP_DIR.glob("*.cpp")):
         text = strip_comments_and_strings(path.read_text())
         rel = str(path)

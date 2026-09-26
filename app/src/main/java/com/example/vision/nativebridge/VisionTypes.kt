@@ -367,6 +367,75 @@ class VisionResult(
     }
 
     companion object {
+        /**
+         * Wire order of the tuning fields, positionally matching the
+         * `EngineConfig` declaration in `rendera_core.h`.
+         *
+         * `nativeConfigure` assigns `p[N]` positionally, so a field inserted on
+         * either side without the other silently misapplies every knob after the
+         * insertion point. Declaring the order here lets the unit tests assert by
+         * field NAME instead of by a literal index that rots, and
+         * `.github/scripts/check_cpp.py` compares this list against the C++
+         * declaration so a divergence fails CI instead of production.
+         */
+        val WIRE_ORDER: List<String> = listOf(
+        "motionMaxShiftHalfRes",
+        "motionMinConfidence",
+        "fineRefineRadius",
+        "diffNoiseFloor",
+        "diffStrongThreshold",
+        "blobMinArea",
+        "blobMaxArea",
+        "blobMinFill",
+        "blobMinMeanStrength",
+        "playerMinComponentArea",
+        "playerMaxComponentArea",
+        "playerMinGreenScore",
+        "playerMinSaturation",
+        "playerMinCompactness",
+        "playerMaxAspect",
+        "playerGateGridUnits",
+        "playerAnchorLocked",
+        "playerAnchorX",
+        "playerAnchorY",
+        "enemyMinComponentArea",
+        "enemyMaxComponentArea",
+        "enemyMinRedScore",
+        "enemyMinSaturation",
+        "enemyMinCompactness",
+        "maxEnemies",
+        "enemyAvoidRadiusNorm",
+        "ownEffectRadiusNorm",
+        "ownEffectTrackNorm",
+        "ownEffectMinHits",
+        "maxTracks",
+        "maxObservations",
+        "ballMinArea",
+        "bouncerMaxArea",
+        "bouncerDotThreshold",
+        "kindMinHitsBeforeLabelling",
+        "trackGatePixels",
+        "trackProcessPos",
+        "trackProcessVel",
+        "trackMeasureNoise",
+        "trackMaxMisses",
+        "trackMinHitsForProjectile",
+        "projectileMinSpeedNorm",
+        "projectileMinStraightness",
+        "playerRadiusNorm",
+        "projectileRadiusNorm",
+        "reactionHorizonSec",
+        "minTtiSec",
+        "lethalTtiSec",
+        "imminentTtiSec",
+        "escapeCandidateCount",
+        "escapeStepNorm",
+        "characterSpeedNorm",
+        )
+
+        /** Index of [field] on the wire, or -1 if it is not exported. */
+        fun wireIndexOf(field: String): Int = WIRE_ORDER.indexOf(field)
+
         /** Floats before the projectile block. Must match `kSolutionFloats`. */
         const val SOLUTION_FLOATS = 24
         const val MAX_PROJECTILES = 8

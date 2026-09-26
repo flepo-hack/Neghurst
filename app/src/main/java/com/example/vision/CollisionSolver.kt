@@ -384,6 +384,33 @@ object CollisionSolver {
             for (e in enemies) {
                 val ex = e.x - playerX
                 val ey = e.y - playerY
+
+                // Repel, not just block. The lateral test below stops a heading
+                // that walks INTO an enemy, but with nothing to block it happily
+                // chose to step TOWARD one: with a symmetric choice available and
+                // an enemy 300 px behind, it picked the direction that closed
+                // the gap. Approaching an enemy is punished in proportion to how
+                // close it is and how directly we close on it.
+                //
+                // Weighted by the avoid radius and capped well below a real
+                // multi-shot clear (1000) or the map border (1600), so this can
+                // only ever break the tie between the two equally valid
+                // perpendiculars. It can never trade a saved brawler for a
+                // comfortable distance from an enemy.
+                val eDist = hypot(ex, ey)
+                if (eDist > 1e-3f) {
+                    val approach = (dx * ex + dy * ey) / eDist
+                    val proximity = clamp(1f - (eDist - enemyAvoidRadiusPx) / enemyAvoidRadiusPx, 0f, 1f)
+                    // Scaled by the distance the step actually CLOSES, not by the
+                    // avoid radius. Scaling by the radius made the term worth up
+                    // to 63, which outweighed the clearance term and tilted the
+                    // escape 45 degrees off perpendicular for a sideways enemy.
+                    // At 0.15 the term is at most 11 for a 135 px step: enough to
+                    // break the up/down tie, where the two perpendiculars score
+                    // identically, and far too small to trade real clearance.
+                    score -= approach * stepPx * 0.15f * proximity
+                }
+
                 // `along` is the enemy's distance down our escape path.
                 val along = ex * dx + ey * dy
                 if (along < 0f || along > reach) continue

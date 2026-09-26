@@ -1386,6 +1386,20 @@ float VisionEngine::chooseEscapeHeading(const Track& t) const {
             const float avoid = cfg_.enemyAvoidRadiusNorm * screenW;
             const float ex = e.x - player_.x;
             const float ey = e.y - player_.y;
+
+            // Repel, not just block, matching CollisionSolver exactly. The
+            // lateral test stops a heading that walks INTO an enemy, but on its
+            // own it happily picks a direction that steps TOWARD one.
+            const float eDist = std::hypot(ex, ey);
+            if (eDist > 1e-3f) {
+                const float approach = (dx * ex + dy * ey) / eDist;
+                const float proximity = clampf(
+                    1.0f - (eDist - avoid) / avoid, 0.0f, 1.0f);
+                // Scaled by the distance the step actually closes, not by the
+                // avoid radius. Same weighting as CollisionSolver.
+                score -= approach * step * 0.15f * proximity;
+            }
+
             // Distance down our escape path.
             const float along = ex * dx + ey * dy;
             if (along < 0.0f || along > reach) continue;

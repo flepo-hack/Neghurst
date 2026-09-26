@@ -1,6 +1,9 @@
 package com.example.vision
 
 import com.example.vision.nativebridge.VisionResult
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -206,6 +209,10 @@ class MultiThreatEscapeTest {
             "escape must not move towards the enemy at y=$enemyY, landed at y=$destY",
             destY < enemyY
         )
+        assertTrue(
+            "and must remain a valid perpendicular escape, got ${s.escapeHeadingDeg}deg",
+            CollisionSolver.isPerpendicular(s.escapeHeadingDeg, 180f, toleranceDeg = 25f)
+        )
     }
 
     @Test
@@ -253,11 +260,11 @@ class MultiThreatEscapeTest {
     }
 
     @Test
-    fun `an enemy beside the brawler is not scored as blocking every heading`() {
+    fun `an enemy beside the brawler biases the escape slightly but never off perpendicular`() {
         // The lateral distance used to be measured against the projectile's
         // flight-line normal, which made it the SAME for every candidate heading.
-        // An enemy standing beside the brawler therefore scored as blocking all
-        // of them equally, and with the raised penalty weight that could push the
+        // An enemy standing beside the brawler therefore scored as blocking all of
+        // them equally, and with the raised penalty weight that could push the
         // escape onto a heading with zero clearance. Placing the enemy off to one
         // side is the only arrangement that exposes it.
         val sideways = CollisionSolver.AvoidPoint(playerX + 200f, playerY)
@@ -268,19 +275,31 @@ class MultiThreatEscapeTest {
             enemies = listOf(sideways),
             enemyAvoidRadiusPx = 200f
         )
-        val without = CollisionSolver.solve(
-            playerX = playerX, playerY = playerY, playerRadiusPx = playerRadius,
-            projectiles = listOf(CollisionSolver.Projectile(1150f, 540f, -900f, 0f)),
-            screenWidthPx = screenW, screenHeightPx = screenH
-        )
-        // The enemy is 200 px to the side and both perpendiculars are 200 px from
-        // it, so it must not swing the choice away from the clean perpendicular.
+        assertTrue(withEnemy.hasThreat)
+
+        // A small bias AWAY from a nearby enemy is intended and correct: it
+        // costs a few pixels of clearance and keeps the brawler from drifting
+        // toward an enemy mid-dodge. What must not happen is a large swing, or
+        // the escape ending up on the wrong side of the projectile.
         assertTrue(
-            "enemy beside the brawler distorted the heading: " +
-                "with=${withEnemy.escapeHeadingDeg} without=${without.escapeHeadingDeg}",
+            "sideways enemy distorted the heading to ${withEnemy.escapeHeadingDeg}deg",
             CollisionSolver.isPerpendicular(
-                withEnemy.escapeHeadingDeg, 180f, toleranceDeg = 10f
+                withEnemy.escapeHeadingDeg, 180f, toleranceDeg = 20f
             )
+        )
+        val headingRad = Math.toRadians(withEnemy.escapeHeadingDeg.toDouble())
+        val clearance = abs(
+            withEnemy.requiredTravelPx * sin(headingRad).toFloat()
+        )
+        assertTrue(
+            "clearance fell to $clearance px, inside the ${playerRadius}px hitbox",
+            clearance > playerRadius
+        )
+        // And it must be biased away from the enemy, i.e. leftward for an enemy
+        // on the right.
+        assertTrue(
+            "escape should lean away from an enemy on its right",
+            cos(headingRad).toFloat() < 0.2f
         )
     }
 
