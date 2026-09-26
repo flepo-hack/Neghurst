@@ -125,15 +125,32 @@ jobs:
       # Compile the native engine on its own, before anything else. A one line
       # JNI typo should fail here in about a minute, not after a full build.
       # ------------------------------------------------------------------
+      # Gradle output is thousands of lines and the Actions console truncates
+      # it, so a compiler error is easy to miss. The real errors are tee'd to a
+      # file and re-emitted as annotations by the step below.
       - name: Käännä natiivinen moottori
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ./gradlew :app:externalNativeBuildRelease \
             -Pandroid.injected.signing.store.file="$ANDROID_INJECTED_SIGNING_STORE_FILE" \
             -Pandroid.injected.signing.store.password="$ANDROID_INJECTED_SIGNING_STORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$ANDROID_INJECTED_SIGNING_KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$ANDROID_INJECTED_SIGNING_KEY_PASSWORD" \
-            --no-daemon --stacktrace
+            --no-daemon --stacktrace 2>&1 | tee /tmp/native.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Raportoi C++-käännösvirheet
+        if: failure()
+        run: |
+          set -uo pipefail
+          echo "--- C/C++ errors ---"
+          grep -E "error:|Error:|FAILED" /tmp/native.log | head -30 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          echo "--- tail ---"
+          tail -20 /tmp/native.log | while IFS= read -r line; do
+            echo "::warning::${line}"
+          done
 
       # Asserts the engine really was built rather than trusting the exit code.
       #
@@ -186,13 +203,33 @@ jobs:
 
       - name: Aja yksikkötestit
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ./gradlew :app:testReleaseUnitTest \
             -Pandroid.injected.signing.store.file="$ANDROID_INJECTED_SIGNING_STORE_FILE" \
             -Pandroid.injected.signing.store.password="$ANDROID_INJECTED_SIGNING_STORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$ANDROID_INJECTED_SIGNING_KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$ANDROID_INJECTED_SIGNING_KEY_PASSWORD" \
-            --no-daemon --stacktrace
+            --no-daemon --stacktrace 2>&1 | tee /tmp/test.log
+          exit "${PIPESTATUS[0]}"
+
+      # Without this, a Kotlin compile error in the test sources is buried in a
+      # truncated console and the only visible symptom is a bare exit code.
+      - name: Raportoi käännösvirheet ja testitulokset
+        if: failure()
+        run: |
+          set -uo pipefail
+          echo "--- Kotlin compile errors ---"
+          grep -E "^e: |^w: .*(unused|never used)" /tmp/test.log | head -40 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          echo "--- failed tasks ---"
+          grep -E "^> Task .* FAILED|Execution failed for task" /tmp/test.log | head -20 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          echo "--- tail ---"
+          tail -25 /tmp/test.log | while IFS= read -r line; do
+            echo "::warning::${line}"
+          done
 
       - name: Yksikkötestien tulos
         if: always()
