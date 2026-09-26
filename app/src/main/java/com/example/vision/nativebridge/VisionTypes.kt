@@ -375,7 +375,7 @@ class VisionResult(
         ArrayList<Projectile>(n).apply {
             for (k in 0 until n) {
                 val o = SOLUTION_FLOATS + k * PROJECTILE_FLOATS
-                if (o + PROJECTILE_FLOATS - 1 >= f.size) break
+                if (o + PROJECTILE_FLOATS - 1 >= floats.size) break
                 add(
                     Projectile(
                         x = floats[o],

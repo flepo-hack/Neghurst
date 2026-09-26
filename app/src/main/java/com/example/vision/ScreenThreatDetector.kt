@@ -164,9 +164,11 @@ class ScreenThreatDetector(
         val threat: ThreatVector?,
         val escape: CollisionSolver.Solution,
         val processMillis: Double,
-        val blobCount: Int,
-        val projectileCount: Int,
-        val enemyCount: Int
+        val blobCount: Int = 0,
+        val projectileCount: Int = 0,
+        val ballCount: Int = 0,
+        val bouncerCount: Int = 0,
+        val enemyCount: Int = 0
     ) {
         val hasDodgeableThreat: Boolean
             get() = threat != null && escape.hasThreat

@@ -131,18 +131,28 @@ def main() -> int:
         declared = set(
             re.findall(r"\b(?:private\s+|internal\s+|protected\s+)?(?:val|var)\s+(\w+)", body)
         )
-        for m in re.finditer(r"\bget\(\)\s*=\s*[^\n]*?([A-Za-z_]\w*)\s*\[", body):
-            name = m.group(1)
-            if name in declared:
-                continue
-            if name in ("it", "this"):
-                continue
-            line_no = body[: m.start()].count("\n") + 1
-            findings.append(
-                f"{path}:{line_no}: getter reads `{name}`, which the file never "
-                f"declares as a property. A bare constructor parameter is out of "
-                f"scope in a function body; declare it `private val`."
-            )
+        # A bare constructor parameter is in scope for property initialisers
+        # and init blocks, and OUT of scope in a function body. Scan the bodies:
+        # a `get() = x[..]` AND a `= run { ... x[..] }` are the same bug, and the
+        # second form slipped through when only the first was checked.
+        for m in re.finditer(
+            r"\bget\(\)\s*=\s*|=\s*run\s*\{",
+            body,
+        ):
+            window = body[m.end() : m.end() + 900]
+            stop = window.find("\n    }")
+            if stop > 0:
+                window = window[:stop]
+            for um in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\[", window):
+                name = um.group(1)
+                if name in declared or name in ("it", "this", "int", "float"):
+                    continue
+                line_no = body[: m.end() + um.start()].count("\n") + 1
+                findings.append(
+                    f"{path}:{line_no}: a member body reads `{name}`, which the "
+                    f"file never declares as a property. A bare constructor "
+                    f"parameter is out of scope there; declare it `private val`."
+                )
 
     # 6. Braces must balance. String surgery on a source file can silently
     #    truncate it - this exact check exists because a line-range edit removed
