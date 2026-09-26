@@ -141,16 +141,7 @@ jobs:
 
       - name: Raportoi C++-käännösvirheet
         if: failure()
-        run: |
-          set -uo pipefail
-          echo "--- C/C++ errors ---"
-          grep -E "error:|Error:|FAILED" /tmp/native.log | head -30 | while IFS= read -r line; do
-            echo "::error::${line}"
-          done
-          echo "--- tail ---"
-          tail -20 /tmp/native.log | while IFS= read -r line; do
-            echo "::warning::${line}"
-          done
+        run: python3 .github/scripts/dump_log.py /tmp/native.log
 
       # Asserts the engine really was built rather than trusting the exit code.
       #
@@ -216,20 +207,7 @@ jobs:
       # truncated console and the only visible symptom is a bare exit code.
       - name: Raportoi käännösvirheet ja testitulokset
         if: failure()
-        run: |
-          set -uo pipefail
-          echo "--- Kotlin compile errors ---"
-          grep -E "^e: |^w: .*(unused|never used)" /tmp/test.log | head -40 | while IFS= read -r line; do
-            echo "::error::${line}"
-          done
-          echo "--- failed tasks ---"
-          grep -E "^> Task .* FAILED|Execution failed for task" /tmp/test.log | head -20 | while IFS= read -r line; do
-            echo "::error::${line}"
-          done
-          echo "--- tail ---"
-          tail -25 /tmp/test.log | while IFS= read -r line; do
-            echo "::warning::${line}"
-          done
+        run: python3 .github/scripts/dump_log.py /tmp/test.log
 
       - name: Yksikkötestien tulos
         if: always()
