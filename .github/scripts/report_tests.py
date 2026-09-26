@@ -48,15 +48,28 @@ def main() -> int:
 
         for tc in r.iter("testcase"):
             for bad in list(tc.iter("failure")) + list(tc.iter("error")):
-                msg = (bad.get("message") or "").strip().splitlines()
-                head = msg[0] if msg else (bad.text or "").strip().splitlines()[:1]
-                detail = head[0] if head else "no message"
-                broken.append((suite, tc.get("name", "?"), detail))
                 body = (bad.text or "").strip()
-                if body:
-                    print(f"::error::{suite}.{tc.get('name')}::{detail}")
-                    for line in body.splitlines()[:12]:
-                        print(f"    {line}")
+                raw = (bad.get("message") or "").strip()
+                # JUnit puts the actionable part on the FIRST line of the
+                # message: "expected:<160> but was:<200>". The stack trace below it
+                # only says which line failed, which is the half that is already
+                # in the test name. Reporting both, with the first line first, is
+                # what makes a run diagnosable without the raw log.
+                first = raw.splitlines()[0] if raw else ""
+                exc = ""
+                for line in body.splitlines():
+                    ls = line.strip()
+                    if ls.startswith(("java.lang.AssertionError",
+                                      "org.junit.ComparisonFailure",
+                                      "java.lang.NullPointerException",
+                                      "java.lang.UnsupportedOperationException")):
+                        exc = ls
+                        break
+                detail = " | ".join(x for x in (exc, first) if x) or "no message"
+                broken.append((suite, tc.get("name", "?"), detail))
+                print(f"::error::{suite}.{tc.get('name')}::{detail}")
+                for line in body.splitlines()[:4]:
+                    print(f"    {line}")
 
     print(
         f"tests={total} failures={failures} errors={errors} skipped={skipped} "

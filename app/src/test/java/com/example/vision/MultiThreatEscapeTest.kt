@@ -115,10 +115,15 @@ class MultiThreatEscapeTest {
         assertTrue(s.hasThreat)
         assertEquals(2, s.projectilesConsidered)
         assertTrue(
-            "no single step can clear both, cleared=${s.projectilesCleared}",
+            "no single step can clear both, cleared=${s.projectilesCleared} " +
+                "deferred=${s.projectilesDeferred}",
             s.partialEscape
         )
         assertTrue("but it must still save the nearer one", s.projectilesCleared >= 1)
+        assertEquals(
+            "and the other may only be deferred, never reported as a clear",
+            1, s.projectilesCleared
+        )
     }
 
     @Test
@@ -439,7 +444,12 @@ class MultiThreatEscapeTest {
             "nothing was sent, so the next frame must try again",
             st.shouldDispatch(analysis(90f, 1, 1), 16L)
         )
-        assertEquals(2, st.dispatchedCount)
+        // The first attempt is rolled back, so the counter reflects gestures
+        // actually sent, not attempts.
+        assertEquals(
+            "a refused dispatch must not be counted as a dodge",
+            1, st.dispatchedCount
+        )
     }
 
     @Test

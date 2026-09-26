@@ -136,8 +136,12 @@ struct EngineConfig {
     // Grid cells. A bullet is a few cells across once the motion residual has
     // eaten its tail; the ball is a large blob because it is a big rolling
     // sphere, not a sprite the size of a bullet.
-    int ballMinArea = 14;
-    int bouncerMaxArea = 26;
+    // A bullet's motion residual is a few cells; the ball is a large rolling
+    // sphere. The bands must not overlap, or a mid-sized bullet is labelled a
+    // ball and the dodge path loses it. ballMinArea > bouncerMaxArea is a real
+    // invariant, and ObjectClassificationTest pins it.
+    int ballMinArea = 24;
+    int bouncerMaxArea = 16;
     // A bouncer reverses hard: the new velocity is nearly anti-parallel to the
     // previous one. A straight shot never does that by accident.
     float bouncerDotThreshold = -0.55f;

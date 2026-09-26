@@ -1294,18 +1294,20 @@ void VisionEngine::updateTracks() {
             t.kind = TrackKind::kUnknown;
             continue;
         }
-        // A hard reversal is decisive: the object changed direction, so it is a
-        // bouncer regardless of size.
+        // Order matters and is deliberate. A hard reversal is decisive: the
+        // object changed direction, so it is a bouncer regardless of size.
         if (t.bounced) {
             t.kind = TrackKind::kBouncer;
-        } else if (t.areaEma >= static_cast<float>(cfg_.ballMinArea)) {
-            // Big and consistent. The ball is the only large, steadily moving
-            // object in Brawl Ball mode.
-            t.kind = TrackKind::kBall;
         } else if (t.areaEma <= static_cast<float>(cfg_.bouncerMaxArea) &&
                    t.straightness >= cfg_.projectileMinStraightness &&
                    t.speedNorm >= cfg_.projectileMinSpeedNorm) {
+            // A clean, small, fast, straight mover is a projectile. Checked
+            // BEFORE the ball, so a mid-sized projectile is never demoted to a
+            // ball on size alone; the ball is what is left once the projectile
+            // test has passed over it.
             t.kind = TrackKind::kProjectile;
+        } else if (t.areaEma >= static_cast<float>(cfg_.ballMinArea)) {
+            t.kind = TrackKind::kBall;
         } else {
             t.kind = TrackKind::kUnknown;
         }

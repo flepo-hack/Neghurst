@@ -99,11 +99,15 @@ class ObjectClassificationTest {
     // without a frame buffer. These mirror the engine's thresholds exactly.
     // -----------------------------------------------------------------------
 
-    private val ballMinArea = 14f
-    private val bouncerMaxArea = 26f
+    private val ballMinArea = 24f
+    private val bouncerMaxArea = 16f
     private val bouncerDotThreshold = -0.55f
 
-    /** The engine's label rule, transcribed so a test can drive it. */
+    /**
+     * The engine's label rule, transcribed so a test can drive it. The order
+     * matters: a clean small fast straight mover is a projectile even if it is
+     * large enough to look like a ball, and the ball is only what is left.
+     */
     private fun classify(
         areaEma: Float,
         bounced: Boolean,
@@ -113,16 +117,18 @@ class ObjectClassificationTest {
         projectileMinStraightness: Float = 0.55f
     ): TrackKind = when {
         bounced -> TrackKind.BOUNCER
-        areaEma >= ballMinArea -> TrackKind.BALL
         areaEma <= bouncerMaxArea &&
             straightness >= projectileMinStraightness &&
             speedNorm >= projectileMinSpeedNorm -> TrackKind.PROJECTILE
+        areaEma >= ballMinArea -> TrackKind.BALL
         else -> TrackKind.UNKNOWN
     }
 
     @Test
     fun `a large steadily moving blob is the ball`() {
-        assertEquals(TrackKind.BALL, classify(areaEma = 40f, bounced = false, 0.9f, 0.1f))
+        // 40 cells, and NOT a clean fast mover, so the projectile test passes
+        // over it and the ball test catches it.
+        assertEquals(TrackKind.BALL, classify(areaEma = 40f, bounced = false, 0.2f, 0.1f))
     }
 
     @Test
@@ -143,12 +149,25 @@ class ObjectClassificationTest {
     }
 
     @Test
+    fun `a mid sized fast straight mover stays a projectile, not a ball`() {
+        // The regression: with the ball band starting at 14 and the projectile
+        // band ending at 26, a 20-cell bullet satisfied the ball test first and
+        // the dodge path lost it.
+        assertEquals(TrackKind.PROJECTILE, classify(areaEma = 20f, bounced = false, 0.9f, 0.6f))
+    }
+
+    @Test
     fun `the ball threshold is above any plausible projectile size`() {
         // A bullet's motion residual is a few cells; the ball is a large rolling
         // sphere. If these ever crossed, bullets would be reported as balls and
         // the dodge path would lose them.
-        assertTrue("bullet", bouncerMaxArea < ballMinArea)
-        assertTrue("ball", ballMinArea >= 10f)
+        // The bands must not overlap, and the ball band must sit above any
+        // plausible bullet size.
+        assertTrue(
+            "bullet band $bouncerMaxArea must be below the ball band $ballMinArea",
+            bouncerMaxArea < ballMinArea
+        )
+        assertTrue("ball", ballMinArea >= 20f)
     }
 
     @Test

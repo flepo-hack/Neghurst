@@ -26,9 +26,14 @@ class ScreenThreatDetectorTest {
     @Test
     fun `grid sizing follows the capture aspect`() {
         val (gw, gh) = ScreenThreatDetector.gridForCapture(480, 216)
-        assertEquals(160, gw)
-        // 480 x 216 is 2.22:1, so the grid must land near 160 x 72.
-        assertTrue("grid height was $gh, expected about 72", gh in 68..76)
+        // The grid is 200 wide; 160 was left over from before the grid was
+        // widened so bullets resolved as more than one cell.
+        assertEquals(200, gw)
+        // 480 x 216 is 2.22:1, so the grid lands near 200 x 90. The height is
+        // snapped to a multiple of 8, which keeps the half resolution plane
+        // inside the same 128x64 FFT padding.
+        assertTrue("grid height was $gh, expected about 88", gh in 84..92)
+        assertEquals("height must stay a multiple of 8", 0, gh % 8)
     }
 
     @Test

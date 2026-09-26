@@ -37,7 +37,10 @@ class CollisionSolverTest {
 
     @Test
     fun `closest approach is rejected when the player is behind the projectile`() {
-        val p = CollisionSolver.Projectile(x = 100f, y = 400f, vx = 500f, vy = 0f)
+        // The projectile must be AHEAD of the player and travelling further
+        // away. A projectile at x=100 moving +x is heading straight AT a player
+        // at x=400, which is a collision, not a rejection.
+        val p = CollisionSolver.Projectile(x = 900f, y = 400f, vx = 500f, vy = 0f)
         val t = CollisionSolver.timeToClosestApproach(400f, 400f, p, horizonSec = 2f)
         assertEquals(-1f, t, 1e-6f)
     }

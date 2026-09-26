@@ -102,7 +102,18 @@ android {
     }
   }
 
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      // Required, not cosmetic. `NativeVisionEngine` logs when the native
+      // library is absent, which is the normal case on a JVM test host, and
+      // android.util.Log is a stub on the JVM. Without this, that log call
+      // throws "Method e in android.util.Log not mocked" from inside the probe
+      // and every test that constructs a ScreenThreatDetector fails while
+      // apparently testing nothing.
+      isReturnDefaultValues = true
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true

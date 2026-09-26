@@ -76,6 +76,12 @@ object CollisionSolver {
         val projectilesCleared: Int = 0,
         /** How many incoming projectiles are considered. */
         val projectilesConsidered: Int = 0,
+        /**
+         * How many were only pushed past the reaction horizon rather than
+         * avoided. Still incoming, just later: worth having bought, but it is not
+         * a dodge.
+         */
+        val projectilesDeferred: Int = 0,
         /** True when the chosen heading was worse than some other one. */
         val partialEscape: Boolean = false
     ) {
@@ -215,10 +221,20 @@ object CollisionSolver {
 
         val destX = playerX + cos(Math.toRadians(heading.toDouble())).toFloat() * requiredTravel
         val destY = playerY + sin(Math.toRadians(heading.toDouble())).toFloat() * requiredTravel
+        // Count the same way the chooser scores, so the report and the decision
+        // cannot disagree. A shot pushed past the reaction horizon is DEFERRED,
+        // not cleared: it is still on a collision course, there is simply time
+        // to deal with it again. Conflating the two made a heading that only
+        // bought time report a clean dodge.
         var cleared = 0
+        var deferred = 0
         for (p in live) {
             val t = timeToClosestApproach(destX, destY, p, reactionHorizonSec)
-            if (t < 0f || missDistanceAt(destX, destY, p, t) >= playerRadiusPx) cleared++
+            if (t >= 0f && missDistanceAt(destX, destY, p, t) >= playerRadiusPx) {
+                cleared++
+            } else if (t < 0f) {
+                deferred++
+            }
         }
 
         return Solution(
@@ -236,6 +252,7 @@ object CollisionSolver {
             expectedTravelPx = expectedTravel,
             escapeIsSufficient = expectedTravel >= requiredTravel,
             projectilesCleared = cleared,
+            projectilesDeferred = deferred,
             projectilesConsidered = live.size,
             // Reporting a dodge as successful when a pellet is still going to
             // land is the single most damaging kind of quiet lie here: the
