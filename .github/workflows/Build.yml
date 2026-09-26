@@ -121,7 +121,21 @@ jobs:
       - name: Allekirjoitusliput
         run: |
           cat >> "$GITHUB_ENV" <<EOF
+          ANDROID_INJECTED_SIGNING_STORE_FILE=$SIGN_STORE
+          ANDROID_INJECTED_SIGNING_STORE_PASSWORD=$SIGN_STORE_PASS
+          ANDROID_INJECTED_SIGNING_KEY_ALIAS=$SIGN_KEY_ALIAS
+          ANDROID_INJECTED_SIGNING_KEY_PASSWORD=$SIGN_KEY_PASS
+          EOF
 
+      # ------------------------------------------------------------------
+      # Compile the Kotlin main sources on their own, before the NDK build.
+      #
+      # The Kotlin compile is the fastest way to find a broken classpath or a
+      # type error: it takes seconds where the native build takes a minute. A
+      # partial compile classpath, which is what asking for a minor SDK version
+      # that is not installed produces, shows up here as every core class going
+      # unresolved, rather than several minutes later behind a wall of clang.
+      # ------------------------------------------------------------------
       - name: Käännä Kotlin-lähdekoodi
         run: |
           set -uo pipefail
@@ -136,11 +150,6 @@ jobs:
       - name: Raportoi Kotlin-käännösvirheet
         if: failure()
         run: python3 .github/scripts/dump_log.py /tmp/kotlin.log
-          ANDROID_INJECTED_SIGNING_STORE_FILE=$SIGN_STORE
-          ANDROID_INJECTED_SIGNING_STORE_PASSWORD=$SIGN_STORE_PASS
-          ANDROID_INJECTED_SIGNING_KEY_ALIAS=$SIGN_KEY_ALIAS
-          ANDROID_INJECTED_SIGNING_KEY_PASSWORD=$SIGN_KEY_PASS
-          EOF
 
       # ------------------------------------------------------------------
       # Compile the native engine on its own, before anything else. A one line
