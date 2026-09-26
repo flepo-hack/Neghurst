@@ -310,8 +310,9 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
     i32[12] = static_cast<int>(e->enemies().size());
 
     // Actionable projectiles, so the Kotlin escape planner can score a heading
-    // against a burst instead of a single shot. Sorted by time to impact so the
-    // earliest ones survive the cap.
+    // against a burst instead of a single shot. When there are more than the
+    // block holds, the ones nearest the brawler survive: those are the ones a
+    // dodge can still act on.
     const auto& allTracks = e->tracks();
     std::vector<const rendera::Track*> actionable;
     actionable.reserve(allTracks.size());
