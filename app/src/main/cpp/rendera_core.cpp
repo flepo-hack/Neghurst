@@ -1245,6 +1245,8 @@ void VisionEngine::updateTracks() {
         t.alive = true;
         t.spawnArea = blobs_[i].area;
         t.areaEma = static_cast<float>(blobs_[i].area);
+        t.spawnX = blobs_[i].sx;
+        t.spawnY = blobs_[i].sy;
         t.lastSeenNanos = runPts_;
         tracks_.push_back(t);
     }
@@ -1253,17 +1255,28 @@ void VisionEngine::updateTracks() {
                                  [&](const Track& t) { return t.misses > cfg_.trackMaxMisses; }),
                   tracks_.end());
 
-    // A track that has never left the player's neighbourhood is the brawler's
-    // own effect, whatever it looked like at birth. Real projectiles cross the
-    // arena; splashes and rustle stay glued to the player. This is the cheaper
-    // and more reliable of the two filters, because it uses the whole history
-    // rather than one frame.
+    // A track that has spent its whole life glued to the brawler is one of the
+    // brawler's own effects, whatever it looked like at birth. Splashes and
+    // rustle stay with the player; real projectiles cross the arena.
+    //
+    // This uses the track's furthest excursion rather than its CURRENT distance,
+    // which is the difference between working and not. A current-distance test
+    // erases two things that must not be erased: a point blank shot, which is
+    // the most lethal case there is and is necessarily close to the player, and
+    // the Brawl Ball resting at the player's feet, which is a normal state at
+    // match start and would silently report zero balls for the whole match.
     if (player_.valid) {
         const float trackR = cfg_.ownEffectTrackNorm * screenW;
         const float trackR2 = trackR * trackR;
         tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
                                      [&](const Track& t) {
                                          if (t.hits < cfg_.ownEffectMinHits) return false;
+                                         if (t.kind == TrackKind::kBall) return false;
+                                         // A track that has travelled further than
+                                         // the radius from where it was first seen has
+                                         // proven it is not attached to the player.
+                                         const float travel = std::hypot(t.x - t.spawnX, t.y - t.spawnY);
+                                         if (travel > trackR) return false;
                                          const float dx = t.x - player_.x;
                                          const float dy = t.y - player_.y;
                                          return dx * dx + dy * dy < trackR2;
@@ -1356,31 +1369,36 @@ float VisionEngine::chooseEscapeHeading(const Track& t) const {
         const float marginX = std::min(tx, screenW - tx);
         const float marginY = std::min(ty, screenH - ty);
         if (marginX < screenW * 0.06f || marginY < screenH * 0.10f) {
-            score -= screenW * 0.30f;
+            // Same absolute weight as the Kotlin planner. Scaling it by the
+            // screen width made the cost resolution dependent, so a 720p phone
+            // was far more willing to step off the map than a 1440p one.
+            score -= 1600.0f;
         }
 
-        // How much of the step runs along the projectile's velocity. Negative
-        // means back toward where the projectile is coming from, i.e. into its
-        // path, so it is ADDED, which penalises it.
-        //
-        // Weighted against the clearance `step`, not the screen width, so it stays
-        // a tie-breaker. Scaling it by the screen made it larger than the
-        // clearance term itself, and the planner abandoned the perpendicular
-        // entirely and settled 45 degrees off it.
-        score += (dx * uhx + dy * uhy) * step * 0.25f;
+        // No "prefer running along the projectile's velocity" term. Measurement on
+        // the Kotlin side showed it is strictly a cost: it pulls the escape 15-30
+        // degrees off perpendicular, and every degree off perpendicular is a
+        // degree of real miss distance given up. The perpendicular maximises
+        // clearance, so it stands alone. The two planners must agree exactly.
 
-        // Keep clear of enemy brawlers: stepping into one is a death, not a
-        // dodge, so a heading that lands inside an enemy avoid radius is
-        // penalised by the depth of the intrusion.
+        // Keep clear of enemy brawlers: stepping into one is a death.
         for (const EnemyMark& e : enemies_) {
             const float avoid = cfg_.enemyAvoidRadiusNorm * screenW;
             const float ex = e.x - player_.x;
             const float ey = e.y - player_.y;
+            // Distance down our escape path.
             const float along = ex * dx + ey * dy;
-            if (along < 0.0f || along > reach) continue;  // not on our path
-            const float lateral = std::fabs(ex * ny - ey * nx);
+            if (along < 0.0f || along > reach) continue;
+            // Distance from OUR PATH, i.e. the cross product with the heading.
+            // Crossing with the flight-line normal instead makes this constant
+            // for every heading, so an enemy standing beside the brawler scores
+            // as blocking all of them equally.
+            const float lateral = std::fabs(ex * dy - ey * dx);
             if (lateral < avoid) {
-                score -= (avoid - lateral) * 1.5f;
+                // 15 per px, in the same units as CollisionSolver's scoring, so
+                // a full overlap costs 1.5 * avoid and dominates the geometric
+                // tie break without outvoting a real multi-shot clear.
+                score -= (avoid - lateral) * 15.0f;
             }
         }
 

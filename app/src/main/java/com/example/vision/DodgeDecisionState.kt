@@ -39,7 +39,18 @@ class DodgeDecisionState(
      * A jitter of a few degrees from tracker noise is not a reason to spend a
      * gesture, but a genuinely different direction is.
      */
-    private val headingToleranceDeg: Float = 20f
+    private val headingToleranceDeg: Float = 20f,
+    /**
+     * Shortest gap between two dispatched gestures.
+     *
+     * Not a blanket cooldown: it only applies to a DIFFERENT plan. A new threat,
+     * or a materially changed heading, still goes through immediately. What it
+     * stops is re-spending a gesture every single frame on a plan that is
+     * drifting a few degrees each frame, which is what happened without it: a
+     * fast shot crosses the 90 px identity grid roughly every other frame, so
+     * "same threat" was false most frames and a gesture was spent on each one.
+     */
+    private val minGapMs: Long = 140L
 ) {
 
     /** What we last committed to, so we can tell a repeat from a new plan. */
@@ -114,9 +125,16 @@ class DodgeDecisionState(
             return false
         }
 
-        // A genuinely new plan: a different threat, or a different direction
-        // because the situation changed. Dispatch immediately, even if the last
-        // dispatch was a frame ago.
+        // A different threat, or a materially different direction. If the plan
+        // changed because the threat DRIFTED rather than because it is new, hold
+        // it briefly rather than chasing it every frame; a genuinely new threat
+        // skips this entirely.
+        val drifted = sameThreat && abs(heading - prev.headingDeg) < 45f
+        if (drifted && nowMs - prev.atMs < minGapMs) {
+            suppressedCount++
+            return false
+        }
+
         return commit(key, heading, nowMs, analysis)
     }
 
@@ -126,8 +144,16 @@ class DodgeDecisionState(
      */
     fun onDispatchFailed() {
         lastCommitment = null
+        // The commitment is rolled back, so the counter has to be too. Otherwise a
+        // permanently unusable plan (uncalibrated anchors return an empty plan
+        // every frame) inflates "dodges" forever while nothing was ever sent.
+        if (dispatchedCount > 0) dispatchedCount--
     }
 
+    /**
+     * Records the intent to dodge. The caller must call [onDispatchFailed] if the
+     * gesture does not actually go out, which also decrements the counter.
+     */
     private fun commit(
         key: Float,
         heading: Float,

@@ -33,7 +33,7 @@ class NativeVisionEngine(
         const val OUT_INTS = 14
 
         /** Must match `kExpected` in `nativeConfigure`. */
-        const val CONFIG_FLOATS = 48
+        const val CONFIG_FLOATS = 52
 
         const val MAX_MASKS = 8
         const val MAX_BLOBS = 48

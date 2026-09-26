@@ -245,15 +245,6 @@ object CollisionSolver {
     }
 
     /**
-     * Scores every heading on a circle and returns the best one.
-     *
-     * For a step `d`, the perpendicular offset from the flight line afterwards
-     * is `|perp + d * (u . n)|`, with `n` the flight-line normal and `u` the
-     * heading. Because `n` is orthogonal to the velocity, the time of closest
-     * approach is unchanged, so maximising this maximises the real miss
-     * distance. The remaining terms are pure feasibility.
-     */
-    /**
      * Scores every heading against **every** live threat and returns the best.
      *
      * A single-threat score is not enough for a burst. A shotgun spread gives
@@ -359,10 +350,12 @@ object CollisionSolver {
             // a negligible weight lets the along term win every single-threat
             // comparison, and the escape then runs *along* the bullet's path
             // instead of away from it.
-            // A real clear is worth 1000 and dominates everything else, so a
-            // heading that saves the brawler always wins. A deferral is worth 400:
-            // genuinely better than doing nothing, but never better than dodging.
-            var score = clearedCount * 1000f + deferredCount * 400f + urgencyWeight
+            // A real clear is worth 1000; a deferral 120. The ratio is chosen so
+            // that even the worst possible heading, which defers all eight
+            // tracked projectiles, scores 960 and can never outrank a heading
+            // that actually saves the brawler. At 400 per deferral the eight of
+            // them reached 3200 and "just wait" beat "dodge".
+            var score = clearedCount * 1000f + deferredCount * 120f + urgencyWeight
             score += abs(perpSigned + stepPx * (dx * nx + dy * ny)) * 0.5f
 
             // The destination must stay on screen with margin. The player keeps
@@ -373,10 +366,11 @@ object CollisionSolver {
             if (min(tx, screenWidthPx - tx) < borderMarginXPx ||
                 min(ty, screenHeightPx - ty) < borderMarginYPx
             ) {
-                // Walking into the border is a death. Costed above clearing a
-                // single shot, below clearing two, so a heading that saves the
-                // brawler from a burst is still rejected if it is off the map.
-                score -= 2000f
+                // Walking into the border is a death. 1600 sits strictly between
+                // one clear (1000) and two (2000), so a heading that saves the
+                // brawler from a burst is still rejected if it is off the map,
+                // while a genuine single clear still beats a border.
+                score -= 1600f
             }
 
             // An earlier version added a term here preferring headings that run
@@ -390,9 +384,17 @@ object CollisionSolver {
             for (e in enemies) {
                 val ex = e.x - playerX
                 val ey = e.y - playerY
+                // `along` is the enemy's distance down our escape path.
                 val along = ex * dx + ey * dy
                 if (along < 0f || along > reach) continue
-                val lateral = abs(ex * ny - ey * nx)
+                // `lateral` must be the enemy's distance from OUR PATH, so it is
+                // the cross product of the enemy's offset with the HEADING. The
+                // previous version crossed it with the flight-line normal instead,
+                // which made `lateral` a constant for every heading: an enemy
+                // standing beside the brawler was scored as blocking all of them
+                // equally, and once the penalty weight was raised the planner could
+                // be pushed onto a heading with zero clearance, i.e. into the shot.
+                val lateral = abs(ex * dy - ey * dx)
                 if (lateral < enemyAvoidRadiusPx) {
                     // Running into an enemy is a death, so this has to dominate
                     // the geometric tie break. It is expressed in the same

@@ -102,7 +102,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     // The Kotlin side is the single source of truth for tuning, so the whole set
     // is transferred explicitly and atomically. Any layout change must bump
     // CONFIG_FLOATS on the Kotlin side too.
-    constexpr jsize kExpected = 48;
+    constexpr jsize kExpected = 52;
     if (env->GetArrayLength(cfg) < kExpected) return;
 
     jfloat* p = env->GetFloatArrayElements(cfg, nullptr);
@@ -135,28 +135,32 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     c.enemyMinCompactness           = p[23];
     c.maxEnemies                    = static_cast<int>(p[24]);
     c.enemyAvoidRadiusNorm          = p[25];
-    c.maxTracks                     = static_cast<int>(p[26]);
-    c.maxObservations               = static_cast<int>(p[27]);
-    c.ballMinArea                   = static_cast<int>(p[28]);
-    c.bouncerMaxArea                = static_cast<int>(p[29]);
-    c.bouncerDotThreshold           = p[30];
-    c.kindMinHitsBeforeLabelling    = static_cast<int>(p[31]);
-    c.trackGatePixels               = p[32];
-    c.trackProcessPos               = p[33];
-    c.trackProcessVel               = p[34];
-    c.trackMeasureNoise             = p[35];
-    c.trackMaxMisses                = static_cast<int>(p[36]);
-    c.trackMinHitsForProjectile     = static_cast<int>(p[37]);
-    c.projectileMinSpeedNorm        = p[38];
-    c.projectileMinStraightness     = p[39];
-    c.playerRadiusNorm              = p[40];
-    c.projectileRadiusNorm          = p[41];
-    c.reactionHorizonSec            = p[42];
-    c.lethalTtiSec                  = p[43];
-    c.imminentTtiSec                = p[44];
-    c.escapeCandidateCount          = static_cast<int>(p[45]);
-    c.escapeStepNorm                = p[46];
-    c.characterSpeedNorm            = p[47];
+    c.ownEffectRadiusNorm           = p[26];
+    c.ownEffectTrackNorm            = p[27];
+    c.ownEffectMinHits              = static_cast<int>(p[28]);
+    c.maxTracks                     = static_cast<int>(p[29]);
+    c.maxObservations               = static_cast<int>(p[30]);
+    c.ballMinArea                   = static_cast<int>(p[31]);
+    c.bouncerMaxArea                = static_cast<int>(p[32]);
+    c.bouncerDotThreshold           = p[33];
+    c.kindMinHitsBeforeLabelling    = static_cast<int>(p[34]);
+    c.trackGatePixels               = p[35];
+    c.trackProcessPos               = p[36];
+    c.trackProcessVel               = p[37];
+    c.trackMeasureNoise             = p[38];
+    c.trackMaxMisses                = static_cast<int>(p[39]);
+    c.trackMinHitsForProjectile     = static_cast<int>(p[40]);
+    c.projectileMinSpeedNorm        = p[41];
+    c.projectileMinStraightness     = p[42];
+    c.playerRadiusNorm              = p[43];
+    c.projectileRadiusNorm          = p[44];
+    c.reactionHorizonSec            = p[45];
+    c.minTtiSec                     = p[46];
+    c.lethalTtiSec                  = p[47];
+    c.imminentTtiSec                = p[48];
+    c.escapeCandidateCount          = static_cast<int>(p[49]);
+    c.escapeStepNorm                = p[50];
+    c.characterSpeedNorm            = p[51];
 
     e->setConfig(c);
     env->ReleaseFloatArrayElements(cfg, p, JNI_ABORT);
@@ -201,6 +205,8 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeSetMask(
  *                    runs.
  *   yStride/uvStride : real plane strides in bytes, so no copy is needed.
  *   outF/jfloatOut  : kOutFloatCount floats, see NativeVisionEngine.kt.
+ *                     24 solution floats, then up to 8 projectiles of 5 floats
+ *                     (x, y, vx, vy, speed) nearest the brawler first.
  *   outI/jintOut    : kOutIntCount ints, see NativeVisionEngine.kt.
  *
  * Returns 1 when a threat was solved, 0 otherwise. Returns -1 on a bad handle.
@@ -314,11 +320,17 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
         if (t.kind == rendera::TrackKind::kBouncer) continue;
         actionable.push_back(&t);
     }
+    // Nearest to the BRAWLER, not to the screen origin. Sorting by x^2 + y^2
+    // alone keeps whichever tracks happen to be near the top-left corner, which
+    // is usually the opposite end of the arena from the shots that matter.
+    const float px = engine->player().x;
+    const float py = engine->player().y;
     std::sort(actionable.begin(), actionable.end(),
-              [](const rendera::Track* a, const rendera::Track* b) {
-                  const float da = a->x * a->x + a->y * a->y;
-                  const float db = b->x * b->x + b->y * b->y;
-                  return da < db;  // nearest first: the ones that matter most
+              [px, py](const rendera::Track* a, const rendera::Track* b) {
+                  const float da = (a->x - px) * (a->x - px) + (a->y - py) * (a->y - py);
+                  const float db = (b->x - px) * (b->x - px) + (b->y - py) * (b->y - py);
+                  if (da != db) return da < db;
+                  return a->id < b->id;  // stable, so the order is reproducible
               });
     if (actionable.size() > static_cast<size_t>(kMaxProjectiles)) {
         actionable.resize(static_cast<size_t>(kMaxProjectiles));

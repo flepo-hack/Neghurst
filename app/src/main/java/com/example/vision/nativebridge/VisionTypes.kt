@@ -54,6 +54,16 @@ data class VisionTuning(
     val enemyAvoidRadiusNorm: Float = 0.11f,
 
     // --- tracking ---
+
+    // --- own-effect rejection ---
+    //
+    // Motion on top of the brawler is a splash, a rustle or dust, not a
+    // projectile, and the brawler used to dodge its own footsteps. Exposed here
+    // because on an unfamiliar map the first thing to need tuning is how far
+    // "on top of the brawler" reaches.
+    val ownEffectRadiusNorm: Float = 0.055f,
+    val ownEffectTrackNorm: Float = 0.085f,
+    val ownEffectMinHits: Int = 2,
     val maxTracks: Int = 16,
     val maxObservations: Int = 48,
     // --- object classification (label only; does not affect threat detection) ---
@@ -76,6 +86,13 @@ data class VisionTuning(
     val playerRadiusNorm: Float = 0.052f,
     val projectileRadiusNorm: Float = 0.011f,
     val reactionHorizonSec: Float = 0.42f,
+    /**
+     * A shot closer than this in seconds is not treated as a threat yet. At zero
+     * a shot already on top of the player counts, which is the right default,
+     * but a small positive value suppresses the degenerate case of reacting to a
+     * projectile that is already inside the brawler's own sprite.
+     */
+    val minTtiSec: Float = 0f,
     val lethalTtiSec: Float = 0.17f,
     val imminentTtiSec: Float = 0.29f,
     val escapeCandidateCount: Int = 24,
@@ -84,7 +101,7 @@ data class VisionTuning(
     /** Brawler top speed, screen widths per second. */
     val characterSpeedNorm: Float = 0.67f
 ) {
-    fun writeInto(dst: FloatArray) {
+        fun writeInto(dst: FloatArray) {
         require(dst.size >= NativeVisionEngine.CONFIG_FLOATS) {
             "config buffer must hold at least ${NativeVisionEngine.CONFIG_FLOATS} floats, " +
                 "got ${dst.size}"
@@ -93,8 +110,8 @@ data class VisionTuning(
         dst[i++] = motionMaxShiftHalfRes.toFloat()
         dst[i++] = motionMinConfidence
         dst[i++] = fineRefineRadius.toFloat()
-        dst[i++] = diffNoiseFloor.toFloat()
-        dst[i++] = diffStrongThreshold.toFloat()
+        dst[i++] = diffNoiseFloor
+        dst[i++] = diffStrongThreshold
         dst[i++] = blobMinArea.toFloat()
         dst[i++] = blobMaxArea.toFloat()
         dst[i++] = blobMinFill
@@ -116,6 +133,9 @@ data class VisionTuning(
         dst[i++] = enemyMinCompactness
         dst[i++] = maxEnemies.toFloat()
         dst[i++] = enemyAvoidRadiusNorm
+        dst[i++] = ownEffectRadiusNorm
+        dst[i++] = ownEffectTrackNorm
+        dst[i++] = ownEffectMinHits.toFloat()
         dst[i++] = maxTracks.toFloat()
         dst[i++] = maxObservations.toFloat()
         dst[i++] = ballMinArea.toFloat()
@@ -133,11 +153,16 @@ data class VisionTuning(
         dst[i++] = playerRadiusNorm
         dst[i++] = projectileRadiusNorm
         dst[i++] = reactionHorizonSec
+        dst[i++] = minTtiSec
         dst[i++] = lethalTtiSec
         dst[i++] = imminentTtiSec
         dst[i++] = escapeCandidateCount.toFloat()
         dst[i++] = escapeStepNorm
-        dst[i] = characterSpeedNorm
+        dst[i++] = characterSpeedNorm
+        check(i == NativeVisionEngine.CONFIG_FLOATS) {
+            "writeInto produced $i floats but the native side reads " +
+                "${NativeVisionEngine.CONFIG_FLOATS}"
+        }
     }
 }
 
@@ -309,22 +334,35 @@ class VisionResult(
     val enemyCount: Int get() = i[12]
 
     /**
-     * Every actionable projectile the engine is tracking, nearest first.
+     * Every actionable projectile the engine is tracking, nearest to the brawler
+     * first.
+     *
+     * Eagerly copied into a fresh list, NOT a `by lazy` view over the engine's
+     * arrays. Those arrays are reused every frame, so a lazy read would return
+     * whatever the last written frame happened to contain, and this object is
+     * held across frames and read from another thread. Copying a handful of
+     * structs is far cheaper than a cross-frame mix-up in the threat the system
+     * believes it is dodging.
      *
      * On the always-on path rather than behind the debug flag, because the escape
      * heading has to be chosen against a whole burst, not a single shot.
      */
-    val projectiles: List<Projectile> by lazy(LazyThreadSafetyMode.NONE) {
+    val projectiles: List<Projectile> = run {
         val n = i[13].coerceIn(0, MAX_PROJECTILES)
-        List(n) { k ->
-            val o = SOLUTION_FLOATS + k * PROJECTILE_FLOATS
-            Projectile(
-                x = f[o],
-                y = f[o + 1],
-                vx = f[o + 2],
-                vy = f[o + 3],
-                speed = f[o + 4]
-            )
+        ArrayList<Projectile>(n).apply {
+            for (k in 0 until n) {
+                val o = SOLUTION_FLOATS + k * PROJECTILE_FLOATS
+                if (o + PROJECTILE_FLOATS - 1 >= f.size) break
+                add(
+                    Projectile(
+                        x = f[o],
+                        y = f[o + 1],
+                        vx = f[o + 2],
+                        vy = f[o + 3],
+                        speed = f[o + 4]
+                    )
+                )
+            }
         }
     }
 

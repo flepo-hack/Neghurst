@@ -167,10 +167,10 @@ class NativeVisionEngineContractTest {
         // A short buffer means SetIntArrayRegion is skipped entirely and the
         // counts silently read as zero, so the size is part of the contract.
         assertTrue(
-            "OUT_INTS must cover ball/bouncer/enemy/dropped counters",
-            NativeVisionEngine.OUT_INTS >= 13
+            "OUT_INTS must cover the projectile count as well",
+            NativeVisionEngine.OUT_INTS >= 14
         )
-        val result = VisionResult(FloatArray(24), IntArray(NativeVisionEngine.OUT_INTS).also {
+        val result = VisionResult(FloatArray(64), IntArray(NativeVisionEngine.OUT_INTS).also {
             it[8] = 2; it[9] = 1; it[12] = 4
         })
         assertEquals(2, result.ballCount)
@@ -186,7 +186,7 @@ class NativeVisionEngineContractTest {
     @Test
     fun `VisionResult maps the native severity codes to the wire enum`() {
         fun result(severity: Int) = VisionResult(
-            FloatArray(24).also { it[9] = 1f }, IntArray(8).also { it[0] = severity }
+            FloatArray(64).also { it[9] = 1f }, IntArray(14).also { it[0] = severity }
         )
         assertEquals(ThreatSeverity.LETHAL, result(3).severity)
         assertEquals(ThreatSeverity.IMMINENT_DANGER, result(2).severity)

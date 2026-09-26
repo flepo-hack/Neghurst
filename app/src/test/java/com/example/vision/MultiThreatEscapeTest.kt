@@ -230,7 +230,7 @@ class MultiThreatEscapeTest {
         // behind, so the choice must not flip between them.
         assertEquals(
             "an enemy directly behind must not change the plan",
-            kotlin.math.abs(away.escapeHeadingDeg - ignored.escapeHeadingDeg),
+            0f,
             kotlin.math.abs(away.escapeHeadingDeg - ignored.escapeHeadingDeg),
             0.001f
         )
@@ -250,6 +250,38 @@ class MultiThreatEscapeTest {
         val heading = s.escapeHeadingDeg
         val dy = kotlin.math.sin(Math.toRadians(heading.toDouble()))
         assertTrue("must not head downwards into the enemy, heading=$heading", dy <= 0.0)
+    }
+
+    @Test
+    fun `an enemy beside the brawler is not scored as blocking every heading`() {
+        // The lateral distance used to be measured against the projectile's
+        // flight-line normal, which made it the SAME for every candidate heading.
+        // An enemy standing beside the brawler therefore scored as blocking all
+        // of them equally, and with the raised penalty weight that could push the
+        // escape onto a heading with zero clearance. Placing the enemy off to one
+        // side is the only arrangement that exposes it.
+        val sideways = CollisionSolver.AvoidPoint(playerX + 200f, playerY)
+        val withEnemy = CollisionSolver.solve(
+            playerX = playerX, playerY = playerY, playerRadiusPx = playerRadius,
+            projectiles = listOf(CollisionSolver.Projectile(1150f, 540f, -900f, 0f)),
+            screenWidthPx = screenW, screenHeightPx = screenH,
+            enemies = listOf(sideways),
+            enemyAvoidRadiusPx = 200f
+        )
+        val without = CollisionSolver.solve(
+            playerX = playerX, playerY = playerY, playerRadiusPx = playerRadius,
+            projectiles = listOf(CollisionSolver.Projectile(1150f, 540f, -900f, 0f)),
+            screenWidthPx = screenW, screenHeightPx = screenH
+        )
+        // The enemy is 200 px to the side and both perpendiculars are 200 px from
+        // it, so it must not swing the choice away from the clean perpendicular.
+        assertTrue(
+            "enemy beside the brawler distorted the heading: " +
+                "with=${withEnemy.escapeHeadingDeg} without=${without.escapeHeadingDeg}",
+            CollisionSolver.isPerpendicular(
+                withEnemy.escapeHeadingDeg, 180f, toleranceDeg = 10f
+            )
+        )
     }
 
     @Test
@@ -295,10 +327,23 @@ class MultiThreatEscapeTest {
             projectilesCleared = cleared,
             projectilesConsidered = considered
         )
+        // `threat` MUST be non-null: `hasDodgeableThreat` is
+        // `threat != null && escape.hasThreat`, so a null threat returns before
+        // the state machine does anything and the test passes without covering
+        // it. This exact trap silently disarmed the first draft of this file.
         return ScreenThreatDetector.Analysis(
             raw = raw, playerX = 960f, playerY = 540f,
             playerDetected = true, playerFromAnchor = false,
-            threat = null, escape = sol, processMillis = 0.0,
+            threat = com.example.model.ThreatVector(
+                threatX = threatX, threatY = threatY,
+                velocityX = -900f, velocityY = 0f,
+                speed = 900f, threatAngleDeg = 180f,
+                dodgeAngleDeg = heading,
+                dodgeDirX = 0f, dodgeDirY = 0f,
+                threatLevel = com.example.model.ThreatLevel.WARNING,
+                timeToImpactMs = 100L, confidence = 1f
+            ),
+            escape = sol, processMillis = 0.0,
             blobCount = 0, projectileCount = considered, enemyCount = 0
         )
     }

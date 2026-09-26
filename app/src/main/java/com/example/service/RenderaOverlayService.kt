@@ -43,6 +43,7 @@ import com.example.ui.overlay.TacticalHudView
 import com.example.vision.AnchorCalibrator
 import com.example.vision.AnchorTarget
 import com.example.vision.Anchors
+import com.example.vision.DodgeDecisionState
 import com.example.vision.ScreenThreatDetector
 import com.example.vision.nativebridge.ScreenRegion
 import com.example.vision.nativebridge.VisionTuning
@@ -595,6 +596,10 @@ class RenderaOverlayService : Service() {
                 it.setAnchors(anchors)
                 it.reset()
             }
+            // The threat identity is a position on the old display, so a
+            // commitment carried across a rotation would suppress the first real
+            // dodge after it.
+            dodgeState.reset()
         }
         frameRing.release()
         frameRing.configure(captureWidth, captureHeight)
@@ -1375,6 +1380,8 @@ class RenderaOverlayService : Service() {
                         detector?.setAnchors(committed)
                         detector?.applyTuning(tuningFromPrefs())
                     }
+                    // New anchors mean a new escape geometry.
+                    dodgeState.reset()
                     pushMaskRegions()
                     removeCalibrationOverlay()
                     triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)

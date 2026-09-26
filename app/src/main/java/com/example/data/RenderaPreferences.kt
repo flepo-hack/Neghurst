@@ -65,9 +65,6 @@ class RenderaPreferences private constructor(context: Context) {
     private val _sensitivity = MutableStateFlow(prefs.getFloat(KEY_SENSITIVITY, 0.70f))
     val sensitivity: StateFlow<Float> = _sensitivity.asStateFlow()
 
-    private val _dodgeCooldownMs = MutableStateFlow(prefs.getLong(KEY_DODGE_COOLDOWN, 320L))
-    val dodgeCooldownMs: StateFlow<Long> = _dodgeCooldownMs.asStateFlow()
-
     private val _targetPackage = MutableStateFlow(prefs.getString(KEY_TARGET_PACKAGE, "") ?: "")
     val targetPackage: StateFlow<String> = _targetPackage.asStateFlow()
 
@@ -168,14 +165,6 @@ class RenderaPreferences private constructor(context: Context) {
         _sensitivity.value = clamped
     }
 
-    fun setDodgeCooldownMs(value: Long) {
-        // A cooldown shorter than the gesture itself would queue dispatches the
-        // system is guaranteed to drop, so it is floored at the gesture length.
-        val clamped = value.coerceIn(180L, 1200L)
-        prefs.edit().putLong(KEY_DODGE_COOLDOWN, clamped).apply()
-        _dodgeCooldownMs.value = clamped
-    }
-
     fun setTarget(packageName: String, gameName: String) {
         prefs.edit()
             .putString(KEY_TARGET_PACKAGE, packageName)
@@ -202,6 +191,5 @@ private const val KEY_PLAYER_Y = "player_y"
 private const val KEY_DEBUG_OVERLAY = "debug_overlay_enabled"
 private const val KEY_AUTO_DODGE = "auto_dodge"
 private const val KEY_SENSITIVITY = "sensitivity"
-private const val KEY_DODGE_COOLDOWN = "dodge_cooldown_ms"
 private const val KEY_TARGET_PACKAGE = "target_package"
 private const val KEY_TARGET_GAME = "target_game"

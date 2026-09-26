@@ -235,7 +235,12 @@ class ScreenThreatDetector(
             debugTracks = engine.readTracks()
         }
 
-        val playerRadius = tuning.playerRadiusNorm * screenWidth
+        // The engine treats a hit as (playerRadius + projectileRadius). The
+        // Kotlin solve must use the same figure or the two disagree about what
+        // counts as a collision, and the HUD will then report a threat the
+        // escape planner considers harmless.
+        val playerRadius =
+            (tuning.playerRadiusNorm + tuning.projectileRadiusNorm) * screenWidth
         val (playerX, playerY, detected) = resolvePlayerPosition(result, screenWidth, screenHeight)
 
         // Every actionable projectile the engine is tracking, not just the one it
@@ -265,9 +270,22 @@ class ScreenThreatDetector(
                 )
             }
         }
-        val projectile = projectiles.minByOrNull {
-            CollisionSolver.timeToClosestApproach(playerX, playerY, it, tuning.reactionHorizonSec)
-        }
+        // The nominated threat must be one that is actually on a collision
+        // course. `timeToClosestApproach` returns -1 for a shot that is behind,
+        // off-line, or beyond the horizon, so a naive `minBy` would happily
+        // select the most harmless projectile in the list and then describe it
+        // as the threat in the HUD and the logs.
+        val projectile = projectiles
+            .filter {
+                CollisionSolver.timeToClosestApproach(
+                    playerX, playerY, it, tuning.reactionHorizonSec
+                ) >= 0f
+            }
+            .minByOrNull {
+                CollisionSolver.timeToClosestApproach(
+                    playerX, playerY, it, tuning.reactionHorizonSec
+                )
+            }
 
         // Recompute the escape locally so the plan is expressed in the same units
         // the gesture planner needs, and so the Kotlin unit tests cover the exact
@@ -285,7 +303,11 @@ class ScreenThreatDetector(
                 imminentTtiSec = tuning.imminentTtiSec,
                 joystickRadiusPx = anchors.joystickRadiusPx(screenWidth),
                 characterSpeedPxPerSec = tuning.characterSpeedNorm * screenWidth,
-                enemies = emptyList()
+                // The engine's enemy marks, fed to the escape planner so it will
+                // not walk into one. They used to be dropped here, which meant
+                // the whole enemy-avoidance term was dead in the real app path and
+                // only ever exercised by tests.
+                enemies = result.enemies.map { CollisionSolver.AvoidPoint(it.x, it.y) }
             )
         } else {
             CollisionSolver.Solution()

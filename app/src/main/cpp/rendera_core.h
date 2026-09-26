@@ -122,6 +122,12 @@ struct EngineConfig {
     // cross the arena.
     float ownEffectTrackNorm = 0.085f;
     int ownEffectMinHits = 2;
+    /**
+     * How many frames of history a track needs before the "own effect" filter can
+     * judge it. Lower than trackMinHitsForProjectile on purpose: a point blank
+     // shot is legitimately close to the player, so the filter has to be able to
+     * clear it rather than wait for more evidence.
+     */
 
     // --- tracking ---
     int maxTracks = 16;
@@ -233,6 +239,9 @@ struct Track {
     float pyy00 = 400.0f, pyy01 = 0.0f, pyy11 = 900.0f;
     /** Blob area at first sight, in grid cells. Sets the size class. */
     int spawnArea = 0;
+    /** Where the track was first seen, in screen pixels. */
+    float spawnX = 0.0f;
+    float spawnY = 0.0f;
     /** Smoothed blob area, used to keep the label stable. */
     float areaEma = 0.0f;
     int hits = 0;

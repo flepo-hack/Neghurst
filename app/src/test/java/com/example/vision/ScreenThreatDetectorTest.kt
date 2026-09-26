@@ -89,7 +89,7 @@ class ScreenThreatDetectorTest {
             // Even with a perfectly formed threat, an uncalibrated stick position
             // must not produce a gesture: it would drag the wrong pixels.
             val result = com.example.vision.nativebridge.VisionResult(
-                FloatArray(24).also {
+                FloatArray(64).also {
                     it[9] = 1f          // playerVisible
                     it[12] = 0.15f      // tti
                     it[13] = 300f       // threatX
@@ -99,7 +99,7 @@ class ScreenThreatDetectorTest {
                     it[17] = 600f       // speed
                     it[18] = 1f         // confidence
                 },
-                IntArray(8).also { it[1] = 1 }  // threatValid
+                IntArray(14).also { it[1] = 1 }  // threatValid
             )
             // `threat` MUST be non-null here: planDodge returns early when there
             // is no dodgeable threat, so a null threat made this test pass without
@@ -181,8 +181,8 @@ class ScreenThreatDetectorTest {
             detector.setAnchors(calibrated)
 
             val undetected = com.example.vision.nativebridge.VisionResult(
-                FloatArray(24),   // playerVisible == 0
-                IntArray(8)
+                FloatArray(64),   // playerVisible == 0
+                IntArray(14)
             )
             val (x, y, detected) = detector.resolvePlayerPosition(undetected, 2400, 1080)
 
@@ -214,12 +214,12 @@ class ScreenThreatDetectorTest {
                 )
             )
             val detected = com.example.vision.nativebridge.VisionResult(
-                FloatArray(24).also {
+                FloatArray(64).also {
                     it[9] = 1f   // playerVisible
                     it[4] = 640f  // playerX
                     it[5] = 700f  // playerY
                 },
-                IntArray(8)
+                IntArray(14)
             )
             val (x, y, isDetected) = detector.resolvePlayerPosition(detected, 2400, 1080)
             assertTrue(isDetected)
