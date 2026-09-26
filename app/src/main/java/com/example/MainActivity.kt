@@ -145,6 +145,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startOverlayService(gameName: String, packageName: String = "") {
+        // Activate the per-game profile so Brawl Stars tuning is actually used.
+        prefs.activate(if (packageName.isBlank()) "default" else packageName)
         val intent = Intent(this, RenderaOverlayService::class.java).apply {
             action = RenderaOverlayService.ACTION_START
             putExtra(RenderaOverlayService.EXTRA_RESULT_CODE, screenCaptureResultCode)
@@ -183,7 +185,7 @@ class MainActivity : ComponentActivity() {
         var hasMediaProjection by remember { mutableStateOf(screenCaptureResultCode != 0) }
 
         val profile by prefs.currentProfile.collectAsState()
-        val isDebugOverlayEnabled by prefs.isDebugOverlayEnabled.collectAsState()
+        val isDebugOverlayEnabled = profile.debugOverlayEnabled
         var installedApps by remember { mutableStateOf<List<GameAppInfo>>(emptyList()) }
         var showGameSelectDialog by remember { mutableStateOf(false) }
 
@@ -299,8 +301,11 @@ class MainActivity : ComponentActivity() {
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // Status pill
-                        val isRunning = RenderaOverlayService.isRunning
+                        // Status pill. Collected from a StateFlow so the UI
+                        // actually reflects the service; the previous code read a
+                        // plain `var` and never recomposed.
+                        val isRunning by RenderaOverlayService.isRunningFlow.collectAsState()
+                        val stats by RenderaOverlayService.stats.collectAsState()
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(20.dp))
@@ -388,10 +393,24 @@ class MainActivity : ComponentActivity() {
                                     letterSpacing = 1.sp
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
-                                InstructionRow(num = "1", text = "Press START and select your target game from the list.")
-                                InstructionRow(num = "2", text = "In-game, tap the floating bubble to calibrate your movement joystick.")
-                                InstructionRow(num = "3", text = "After calibration, a single tap pauses or resumes auto-dodge.")
-                                InstructionRow(num = "4", text = "Long-press the bubble anytime to open the settings menu.")
+                                InstructionRow(num = "1", text = "Press START and pick your game, then accept the capture prompt.")
+                                InstructionRow(
+                                    num = "2",
+                                    text = "In the match, tap the R bubble once -> CALIBRATION. Move the rings onto your joystick and your brawler, then press LOCK & ARM."
+                                )
+                                InstructionRow(num = "3", text = "Calibration is mandatory: dodge stays disarmed until both anchors are locked.")
+                                InstructionRow(num = "4", text = "Afterwards, one tap on the bubble arms/disarms auto-dodge. Long-press opens the menu.")
+                                InstructionRow(num = "5", text = "Enable the TACTICAL RADAR above to see exactly what the engine tracks.")
+
+                                if (isRunning) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = stats.latestTacticalAdvice,
+                                        color = NeonCyan,
+                                        fontSize = 10.sp,
+                                        lineHeight = 13.sp
+                                    )
+                                }
                             }
                         }
 
@@ -429,7 +448,7 @@ class MainActivity : ComponentActivity() {
                                 Slider(
                                     value = profile.sensitivity,
                                     onValueChange = { newVal ->
-                                        prefs.updateSensitivity(newVal)
+                                        prefs.setSensitivity(newVal)
                                     },
                                     valueRange = 0.1f..1.0f,
                                     colors = SliderDefaults.colors(
@@ -489,7 +508,7 @@ class MainActivity : ComponentActivity() {
                                                 RoundedCornerShape(20.dp)
                                             )
                                             .clickable {
-                                                prefs.setDebugOverlayEnabled(!isDebugOverlayEnabled)
+                                                prefs.setDebugOverlay(!isDebugOverlayEnabled)
                                             }
                                             .padding(horizontal = 14.dp, vertical = 8.dp)
                                     ) {
@@ -645,6 +664,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun launchTargetGame(game: GameAppInfo?, hasOverlay: Boolean, hasAccessibility: Boolean) {
+        if (game != null) prefs.activate(game.packageName)
         if (!hasOverlay) {
             Toast.makeText(this, "Please enable Display Over Other Apps permission first!", Toast.LENGTH_LONG).show()
             val intent = Intent(

@@ -7,101 +7,126 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * Persistence for the dodge profile.
+ *
+ * Profiles are stored per target package, which the previous version never did:
+ * `EXTRA_PACKAGE_NAME` was passed to the service and then dropped on the floor,
+ * so selecting "Brawl Stars" loaded the generic profile and none of the
+ * Brawl Stars tuning was ever applied.
+ */
 class RenderaPreferences(context: Context) {
 
-    private val prefs: SharedPreferences = context.getSharedPreferences("rendera_config", Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences =
+        context.applicationContext.getSharedPreferences("rendera_config", Context.MODE_PRIVATE)
 
-    private val _currentProfile = MutableStateFlow(loadProfile())
-    val currentProfile: StateFlow<DodgeProfile> = _currentProfile.asStateFlow()
+    private val _profile = MutableStateFlow(load(DodgeProfile.DEFAULT_KEY))
+    val currentProfile: StateFlow<DodgeProfile> = _profile.asStateFlow()
 
-    private val _isDebugOverlayEnabled = MutableStateFlow(prefs.getBoolean("debug_overlay_enabled", true))
-    val isDebugOverlayEnabled: StateFlow<Boolean> = _isDebugOverlayEnabled.asStateFlow()
+    /** The profile the running service is actually using. */
+    @Volatile
+    var activeKey: String = DodgeProfile.DEFAULT_KEY
+        private set
 
-    fun setDebugOverlayEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean("debug_overlay_enabled", enabled).apply()
-        _isDebugOverlayEnabled.value = enabled
-    }
+    private fun keyFor(packageName: String): String =
+        if (packageName.isBlank() || packageName == DodgeProfile.DEFAULT_KEY) {
+            DodgeProfile.DEFAULT_KEY
+        } else {
+            packageName
+        }
 
-    fun loadProfile(packageName: String = "default"): DodgeProfile {
-        val prefix = if (packageName.isEmpty()) "default_" else "${packageName}_"
+    fun load(packageName: String = activeKey): DodgeProfile {
+        val k = keyFor(packageName)
+        val seed = DodgeProfile.forPackage(k)
         return DodgeProfile(
-            packageName = packageName,
-            profileName = prefs.getString("${prefix}name", "Universal Game Profile") ?: "Universal Game Profile",
-            joystickCenterX = prefs.getFloat("${prefix}joy_x", 0.22f),
-            joystickCenterY = prefs.getFloat("${prefix}joy_y", 0.75f),
-            joystickRadius = prefs.getFloat("${prefix}joy_radius", 140f),
-            playerCenterX = prefs.getFloat("${prefix}player_x", 0.50f),
-            playerCenterY = prefs.getFloat("${prefix}player_y", 0.50f),
-            threatRadius = prefs.getFloat("${prefix}threat_radius", 0.35f),
-            dodgeDurationMs = prefs.getLong("${prefix}dodge_duration", 180L),
-            dodgeDistanceFactor = prefs.getFloat("${prefix}dodge_dist", 0.90f),
-            dodgeCooldownMs = prefs.getLong("${prefix}dodge_cooldown", 280L),
-            sensitivity = prefs.getFloat("${prefix}sensitivity", 0.70f),
-            autoDodgeEnabled = prefs.getBoolean("${prefix}auto_dodge", true),
-            soundHapticEnabled = prefs.getBoolean("${prefix}haptic", true),
-            aiDeepVisionEnabled = prefs.getBoolean("${prefix}ai_vision", true)
+            packageName = seed.packageName,
+            profileName = prefs.getString("$k.name", seed.profileName) ?: seed.profileName,
+            joystickCenterX = prefs.getFloat("$k.joy_x", seed.joystickCenterX),
+            joystickCenterY = prefs.getFloat("$k.joy_y", seed.joystickCenterY),
+            joystickRadius = prefs.getFloat("$k.joy_r", seed.joystickRadius),
+            playerCenterX = prefs.getFloat("$k.player_x", seed.playerCenterX),
+            playerCenterY = prefs.getFloat("$k.player_y", seed.playerCenterY),
+            anchorConfirmed = prefs.getBoolean("$k.anchor_ok", false),
+            joystickConfirmed = prefs.getBoolean("$k.joy_ok", false),
+            dodgeHoldMs = prefs.getLong("$k.hold_ms", seed.dodgeHoldMs),
+            dodgeDeflection = prefs.getFloat("$k.deflect", seed.dodgeDeflection),
+            dodgeCooldownMs = prefs.getLong("$k.cooldown", seed.dodgeCooldownMs),
+            sensitivity = prefs.getFloat("$k.sensitivity", seed.sensitivity),
+            tilePixels = prefs.getFloat("$k.tile_px", 0f),
+            autoDodgeEnabled = prefs.getBoolean("$k.auto_dodge", seed.autoDodgeEnabled),
+            debugOverlayEnabled = prefs.getBoolean("$k.debug_overlay", seed.debugOverlayEnabled),
+            hapticEnabled = prefs.getBoolean("$k.haptic", seed.hapticEnabled)
         )
     }
 
-    fun saveProfile(profile: DodgeProfile) {
-        val prefix = if (profile.packageName.isEmpty()) "default_" else "${profile.packageName}_"
+    fun activate(packageName: String) {
+        activeKey = keyFor(packageName)
+        _profile.value = load(activeKey)
+    }
+
+    fun save(profile: DodgeProfile) {
+        val k = keyFor(profile.packageName)
         prefs.edit().apply {
-            putString("${prefix}name", profile.profileName)
-            putFloat("${prefix}joy_x", profile.joystickCenterX)
-            putFloat("${prefix}joy_y", profile.joystickCenterY)
-            putFloat("${prefix}joy_radius", profile.joystickRadius)
-            putFloat("${prefix}player_x", profile.playerCenterX)
-            putFloat("${prefix}player_y", profile.playerCenterY)
-            putFloat("${prefix}threat_radius", profile.threatRadius)
-            putLong("${prefix}dodge_duration", profile.dodgeDurationMs)
-            putFloat("${prefix}dodge_dist", profile.dodgeDistanceFactor)
-            putLong("${prefix}dodge_cooldown", profile.dodgeCooldownMs)
-            putFloat("${prefix}sensitivity", profile.sensitivity)
-            putBoolean("${prefix}auto_dodge", profile.autoDodgeEnabled)
-            putBoolean("${prefix}haptic", profile.soundHapticEnabled)
-            putBoolean("${prefix}ai_vision", profile.aiDeepVisionEnabled)
+            putString("$k.name", profile.profileName)
+            putFloat("$k.joy_x", profile.joystickCenterX)
+            putFloat("$k.joy_y", profile.joystickCenterY)
+            putFloat("$k.joy_r", profile.joystickRadius)
+            putFloat("$k.player_x", profile.playerCenterX)
+            putFloat("$k.player_y", profile.playerCenterY)
+            putBoolean("$k.anchor_ok", profile.anchorConfirmed)
+            putBoolean("$k.joy_ok", profile.joystickConfirmed)
+            putLong("$k.hold_ms", profile.dodgeHoldMs)
+            putFloat("$k.deflect", profile.dodgeDeflection)
+            putLong("$k.cooldown", profile.dodgeCooldownMs)
+            putFloat("$k.sensitivity", profile.sensitivity)
+            putFloat("$k.tile_px", profile.tilePixels)
+            putBoolean("$k.auto_dodge", profile.autoDodgeEnabled)
+            putBoolean("$k.debug_overlay", profile.debugOverlayEnabled)
+            putBoolean("$k.haptic", profile.hapticEnabled)
             apply()
         }
-        _currentProfile.value = profile
+        if (keyFor(profile.packageName) == activeKey) _profile.value = profile
     }
 
-    fun updateJoystickCalibration(centerX: Float, centerY: Float, radius: Float) {
-        prefs.edit().putBoolean("joystick_calibrated", true).apply()
-        val updated = _currentProfile.value.copy(
-            joystickCenterX = centerX,
-            joystickCenterY = centerY,
-            joystickRadius = radius
+    private fun update(transform: (DodgeProfile) -> DodgeProfile) {
+        val next = transform(_profile.value)
+        save(next)
+    }
+
+    fun setJoystick(xNorm: Float, yNorm: Float, radiusPx: Float, confirmed: Boolean = true) = update {
+        it.copy(
+            joystickCenterX = xNorm.coerceIn(0.02f, 0.98f),
+            joystickCenterY = yNorm.coerceIn(0.02f, 0.98f),
+            joystickRadius = radiusPx.coerceIn(40f, 1200f),
+            joystickConfirmed = confirmed
         )
-        saveProfile(updated)
     }
 
-    fun isJoystickCalibrated(): Boolean {
-        return prefs.getBoolean("joystick_calibrated", true)
-    }
-
-    fun resetJoystickCalibration() {
-        prefs.edit().putBoolean("joystick_calibrated", false).apply()
-    }
-
-    fun updatePlayerCalibration(centerX: Float, centerY: Float) {
-        val updated = _currentProfile.value.copy(
-            playerCenterX = centerX,
-            playerCenterY = centerY
+    fun setPlayer(xNorm: Float, yNorm: Float, confirmed: Boolean = true) = update {
+        it.copy(
+            playerCenterX = xNorm.coerceIn(0.02f, 0.98f),
+            playerCenterY = yNorm.coerceIn(0.02f, 0.98f),
+            anchorConfirmed = confirmed
         )
-        saveProfile(updated)
     }
 
-    fun toggleAutoDodge(enabled: Boolean) {
-        val updated = _currentProfile.value.copy(autoDodgeEnabled = enabled)
-        saveProfile(updated)
+    fun setAutoDodge(enabled: Boolean) = update { it.copy(autoDodgeEnabled = enabled) }
+
+    fun setDebugOverlay(enabled: Boolean) = update { it.copy(debugOverlayEnabled = enabled) }
+
+    fun setSensitivity(value: Float) = update { it.copy(sensitivity = value.coerceIn(0f, 1f)) }
+
+    fun setDodgeHoldMs(ms: Long) = update { it.copy(dodgeHoldMs = ms.coerceIn(60L, 900L)) }
+
+    fun setTilePixels(px: Float) = update { it.copy(tilePixels = px) }
+
+    /** True only when both anchors were explicitly confirmed. */
+    fun isCalibrated(): Boolean {
+        val p = _profile.value
+        return p.anchorConfirmed && p.joystickConfirmed
     }
 
-    fun setAutoDodge(enabled: Boolean) {
-        toggleAutoDodge(enabled)
-    }
-
-    fun updateSensitivity(sensitivity: Float) {
-        val updated = _currentProfile.value.copy(sensitivity = sensitivity.coerceIn(0.1f, 1.0f))
-        saveProfile(updated)
+    fun clearCalibration() = update {
+        it.copy(anchorConfirmed = false, joystickConfirmed = false)
     }
 }

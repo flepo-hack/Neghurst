@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">Rendera</string>
-    <string name="accessibility_service_description">Rendera Accessibility Service enables automated high-speed tactical joystick gestures and dodge assistance in games.</string>
+    <string name="accessibility_service_description">Rendera performs high-speed dodge gestures on a virtual joystick while reading the game screen. It never reads page content and never stores anything.</string>
     <string name="service_notification_title">Rendera AI Vision Active</string>
     <string name="service_notification_desc">Screen reading and tactical auto-dodge monitor running.</string>
 </resources>

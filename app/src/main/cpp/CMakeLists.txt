@@ -1,48 +1,62 @@
-# CMakeLists.txt for Rendera Native Pipeline
-# High-performance zero-copy C++ OpenCV / NDK Screen Threat Detection Engine
+# CMakeLists for the Rendera native vision engine.
+#
+# There is deliberately no OpenCV dependency. Everything the engine needs
+# (SAD block matching, Sobel/NMS/hysteresis Canny, Hough ring voting, connected
+# components, the alpha-beta tracker and the CPA solver) is a few hundred lines
+# of tight, allocation-free integer/float code in rendera_native.cpp. Vendoring
+# a ~70 MB OpenCV AAR would add size and licence obligations without making the
+# per-frame cost any lower at our working resolution of 240 columns.
 
 cmake_minimum_required(VERSION 3.22.1)
 
-project("rendera_native" VERSION 1.0.0 LANGUAGES CXX)
+project("rendera_native" VERSION 3.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Optimization flags for ARM64-v8a / NEON vectorization
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math -flto -DNDEBUG")
+# The engine is a leaf library; link the STL statically so the APK does not have
+# to ship libc++_shared.so alongside it.
+set(ANDROID_STL c++_static)
 
-# Find Android log library
+# -ffast-math is NOT used: the tracker and the CPA solver rely on strict IEEE
+# semantics for the hypot/sqrt calls, and the win is negligible for integer-
+# dominated code.
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_DEBUG "-O1 -g")
+
 find_library(log-lib log)
 find_library(android-lib android)
 
-# Optional OpenCV integration:
-# When OpenCV Android SDK is provided, set OpenCV_DIR to <path>/sdk/native/jni
-# and uncomment find_package(OpenCV REQUIRED)
-#
-# if(OpenCV_DIR)
-#     find_package(OpenCV REQUIRED)
-#     include_directories(${OpenCV_INCLUDE_DIRS})
-# endif()
+add_library(rendera_native SHARED rendera_native.cpp)
 
-# Source files
-set(SOURCE_FILES
-    rendera_native.cpp
+target_include_directories(rendera_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+target_compile_options(rendera_native PRIVATE
+    -Wall
+    -Wextra
+    -Wno-unused-parameter
+    $<$<CONFIG:Release>:-flto>
 )
 
-# Header files
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}
+# NEON is mandatory for the per-frame cost. arm64 always has it; on armv7 it has
+# to be requested explicitly and the FPU ABI has to match the NDK default.
+if(ANDROID_ABI STREQUAL "armeabi-v7a")
+    target_compile_options(rendera_native PRIVATE
+        -march=armv7-a
+        -mfpu=neon
+        -mfloat-abi=softfp
+    )
+endif()
+
+target_link_options(rendera_native PRIVATE
+    -Wl,--gc-sections
+    -Wl,-z,max-page-size=16384
+    -Wl,--as-needed
 )
 
-add_library(
-    rendera_native
-    SHARED
-    ${SOURCE_FILES}
-)
-
-target_link_libraries(
-    rendera_native
+target_link_libraries(rendera_native
     ${log-lib}
     ${android-lib}
-    # ${OpenCV_LIBS} # Link when OpenCV NDK SDK is configured
+    android
 )

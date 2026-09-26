@@ -23,19 +23,40 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
-  signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+  // The NDK/C++ vision engine is a core part of Rendera, not an optional extra.
+  // `path` must point at the CMakeLists.txt, otherwise the cpp/ tree is never
+  // compiled and System.loadLibrary("rendera_native") can never succeed.
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
     }
+  }
+
+  defaultConfig {
+    ndk {
+      // armeabi-v7a is kept for the long tail of low-end devices where the
+      // C++ engine actually matters the most (no JIT fallback available).
+      abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+    }
+  }
+
+  signingConfigs {
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
+    }
+    create("release") {
+      val envKeystore = System.getenv("KEYSTORE_PATH")
+      val candidate = envKeystore?.takeIf { it.isNotBlank() } ?: "${rootDir}/my-upload-key.jks"
+      if (file(candidate).exists()) {
+        storeFile = file(candidate)
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
   }
 
@@ -44,7 +65,13 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      // Only use the release keystore when one actually exists on disk.
+      // CI injects the signing material via android.injected.signing.*.
+      signingConfig = if (signingConfigs.getByName("release").storeFile != null) {
+        signingConfigs.getByName("release")
+      } else {
+        signingConfigs.getByName("debugConfig")
+      }
     }
     debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }

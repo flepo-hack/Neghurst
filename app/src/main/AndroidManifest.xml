@@ -51,6 +51,7 @@
             android:name=".service.RenderaOverlayService"
             android:enabled="true"
             android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboardHidden|uiMode"
             android:foregroundServiceType="mediaProjection" />
 
     </application>
