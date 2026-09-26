@@ -107,11 +107,46 @@ def main(path: str) -> int:
                         emit("warning", line)
                     break
 
-    # ALWAYS emit the tail as well. A single matched phrase is not enough to act
-    # on: the first version emitted one line ("FAILURE: Build failed with an
-    # exception") and said nothing, because the reason is the block under it.
-    emit("notice", f"{errors} matched error line(s); tail follows")
-    for line in [l for l in lines[-70:] if l.strip()]:
+    # Gradle's own "What went wrong" block is the diagnosis. It sits ABOVE a
+    # stack trace, and dumping the tail only returns the trace, which is how the
+    # previous version reported the cause as "FAILURE: Build failed with an
+    # exception" and nothing else.
+    emit("notice", f"{errors} matched error line(s) in {path}")
+    start = None
+    for i, line in enumerate(lines):
+        if "What went wrong" in line:
+            start = i
+            break
+    if start is not None:
+        emit("error", "---- Gradle: What went wrong ----")
+        depth = 0
+        for line in lines[start + 1 : start + 60]:
+            if not line.strip():
+                continue
+            if line.lstrip().startswith("at "):
+                # A stack frame: noise here, and there are hundreds of them.
+                depth += 1
+                if depth > 4:
+                    break
+                continue
+            if line.startswith("* Try:") or line.startswith("* Exception is:"):
+                break
+            emit("error", line)
+            depth = 0
+
+    # Any compiler diagnostics, which Gradle prints much earlier.
+    compilers = [
+        l for l in lines
+        if re.match(r"^e: ", l) or re.match(r"^.*\berror:\s", l, re.I)
+    ]
+    if compilers:
+        emit("error", "---- compiler diagnostics ----")
+        for line in compilers[:40]:
+            emit("error", line)
+
+    # And the last non-frame lines, as a backstop.
+    tail = [l for l in lines[-40:] if l.strip() and not l.lstrip().startswith("at ")]
+    for line in tail:
         emit("warning", line)
     return 0
 
