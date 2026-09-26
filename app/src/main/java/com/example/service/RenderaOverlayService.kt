@@ -1368,58 +1368,58 @@ class RenderaOverlayService : Service() {
             AnchorCalibrator.suggestJoystick(displayWidth, displayHeight)
         }
 
-        // The callbacks reference the view, so the callbacks are built first and
-        // the view second. Declaring `val view = CalibrationOverlayView(... view ...)`
-        // is a self-reference and does not resolve.
+        // The callbacks call methods on the view they are handed to during
+        // construction, so the view cannot be a `val` in its own initialiser.
+        // They are built first and reach the view through a lateinit.
         lateinit var overlay: CalibrationOverlayView
         val calibrationCallbacks = object : CalibrationOverlayView.Callbacks {
-            override fun onAnchorMoved(target: AnchorTarget, screenX: Float, screenY: Float) {
-                val updated = AnchorCalibrator.applyTouch(
-                    anchors = anchors,
-                    target = target,
-                    screenX = screenX,
-                    screenY = screenY,
-                    displayWidth = displayWidth,
-                    displayHeight = displayHeight
-                )
-                anchors = updated
-                overlay.setStatus(
-                    "${target.name}: ${"%.3f".format(updated.playerX)}, " +
-                        "${"%.3f".format(updated.playerY)}"
-                )
-            }
-
-            override fun onAutoDetectRequested() {
-                overlay.setStatus("Auto-detect needs a live game frame. " +
-                    "Place the brawler on open ground, then press LOCK & ACTIVATE.")
-                // Auto-detect runs from the live vision loop, not from a one-off
-                // screenshot: the player is found on the world-anchored aligned
-                // frame, which needs the engine's motion history.
-                runAutoDetect()
-            }
-
-            override fun onCommitted(committed: Anchors) {
-                anchors = committed
-                prefs.setAnchors(committed)
-                synchronized(detectorLock) {
-                    detector?.setAnchors(committed)
-                    detector?.applyTuning(tuningFromPrefs())
+                override fun onAnchorMoved(target: AnchorTarget, screenX: Float, screenY: Float) {
+                    val updated = AnchorCalibrator.applyTouch(
+                        anchors = anchors,
+                        target = target,
+                        screenX = screenX,
+                        screenY = screenY,
+                        displayWidth = displayWidth,
+                        displayHeight = displayHeight
+                    )
+                    anchors = updated
+                    overlay.setStatus(
+                        "${target.name}: ${"%.3f".format(updated.playerX)}, ${"%.3f".format(updated.playerY)}"
+                    )
                 }
-                // New anchors mean a new escape geometry.
-                dodgeState.reset()
-                pushMaskRegions()
-                removeCalibrationOverlay()
-                triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)
-                toast("Anchors locked for ${displayWidth}x$displayHeight")
-            }
 
-            override fun onCancelled() {
-                removeCalibrationOverlay()
-            }
+                override fun onAutoDetectRequested() {
+                    overlay.setStatus("Auto-detect needs a live game frame. " +
+                        "Place the brawler on open ground, then press LOCK & ACTIVATE.")
+                    // Honest limitation: auto-detect runs from the live vision
+                    // loop, not from a one-off screenshot, because the player is
+                    // found on the world-anchored aligned frame which needs the
+                    // engine's motion history.
+                    runAutoDetect()
+                }
 
-            override fun onTargetChanged(target: AnchorTarget) {
-                overlay.setStatus("Editing $target")
-            }
+                override fun onCommitted(committed: Anchors) {
+                    anchors = committed
+                    prefs.setAnchors(committed)
+                    synchronized(detectorLock) {
+                        detector?.setAnchors(committed)
+                        detector?.applyTuning(tuningFromPrefs())
+                    }
+                    // New anchors mean a new escape geometry.
+                    dodgeState.reset()
+                    pushMaskRegions()
+                    removeCalibrationOverlay()
+                    triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                    toast("Anchors locked for ${displayWidth}x$displayHeight")
+                }
+
+                override fun onCancelled() {
+                    removeCalibrationOverlay()
+                }
+
+                override fun onTargetChanged(target: AnchorTarget) {
+                    overlay.setStatus("Editing $target")
+                }
         }
 
         val view = CalibrationOverlayView(
@@ -1431,3 +1431,113 @@ class RenderaOverlayService : Service() {
         )
         overlay = view
 
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        )
+        try {
+            windowManager.addView(view, params)
+            calibrationView = view
+            pushMaskRegions()
+            anchorCurrentOverlay(anchors)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not show the calibration overlay", t)
+        }
+    }
+
+    /**
+     * Seeds the calibration from the live detector.
+     *
+     * The old implementation read a single `Bitmap` and, when that read failed,
+     * fell back to hard-coded fractions and then **saved them as if the
+     * calibration had succeeded** while reporting "Calibrated &amp; Active". That
+     * is the "auto calib does nothing" symptom. Here a failure is reported and
+     * the previously committed anchors are left untouched.
+     */
+    private fun runAutoDetect() {
+        val d = detector
+        if (d == null || !d.isNativeAvailable) {
+            mainHandler.post { toast("Vision engine unavailable; auto-detect skipped") }
+            return
+        }
+        val live = latestAnalysis ?: run {
+            mainHandler.post {
+                toast("No analysed frame yet. Play for a second, then retry.")
+            }
+            return
+        }
+        if (!live.playerDetected) {
+            mainHandler.post {
+                toast("Player not found. Put the brawler in the open and retry.")
+            }
+            return
+        }
+        mainHandler.post {
+            val updated = anchors.copy(
+                joystickX = anchors.joystickX,
+                joystickY = anchors.joystickY,
+                playerX = (live.playerX / displayWidth).coerceIn(0.05f, 0.95f),
+                playerY = (live.playerY / displayHeight).coerceIn(0.05f, 0.95f),
+                calibrated = true,
+                calibratedForWidth = displayWidth,
+                calibratedForHeight = displayHeight
+            )
+            anchors = updated
+            calibrationView?.applyAnchors(updated)
+            toast("Player anchor auto-detected")
+        }
+    }
+
+    private fun anchorCurrentOverlay(value: Anchors) {
+        calibrationView?.applyAnchors(value)
+    }
+
+    private fun removeCalibrationOverlay() {
+        calibrationView?.let { runCatching { windowManager.removeView(it) } }
+        calibrationView = null
+        pushMaskRegions()
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    private fun overlayWindowType(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+
+    private fun dp(v: Float): Float = v * resources.displayMetrics.density
+
+    private fun roundedBackground(color: Int) =
+        android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(color)
+            setStroke(dp(2f).roundToInt(), 0xFFFFFFFF.toInt())
+        }
+
+    private fun triggerHapticFeedback(constants: Int) {
+        try {
+            bubbleView?.performHapticFeedback(constants)
+        } catch (t: Throwable) {
+            Log.w(TAG, "haptic feedback failed", t)
+        }
+    }
+
+    private fun toast(message: String) {
+        try {
+            Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Log.w(TAG, "toast failed", t)
+        }
+    }
+
+}

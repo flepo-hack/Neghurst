@@ -144,6 +144,29 @@ def main() -> int:
                 f"scope in a function body; declare it `private val`."
             )
 
+    # 6. Braces must balance. String surgery on a source file can silently
+    #    truncate it - this exact check exists because a line-range edit removed
+    #    the last 100 lines of a service and nothing noticed until the compiler
+    #    reported a stray brace.
+    for path in files:
+        body = re.sub(r"/\*.*?\*/", "", path.read_text(), flags=re.S)
+        body = re.sub(r'"""(?:.|\n)*?"""', '""', body, flags=re.S)
+        body = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', body)
+        body = re.sub(r"'(?:\\.|[^'\\\n])'", "''", body)
+        depth = 0
+        lowest = 0
+        for ch in body:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                lowest = min(lowest, depth)
+        if depth != 0 or lowest < 0:
+            findings.append(
+                f"{path}: braces do not balance (final depth {depth}, "
+                f"lowest {lowest}); the file is truncated or has a stray brace"
+            )
+
     if findings:
         for f in findings:
             print(f"::error::{f}")
