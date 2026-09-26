@@ -118,16 +118,24 @@ class NativeVisionEngineContractTest {
         // Spot check positions against the native read order. These indices are
         // load bearing: nativeConfigure assigns p[N] positionally, so a drift
         // here silently misapplies every tuning knob after the insertion point.
-        assertEquals(VisionTuning().motionMaxShiftHalfRes.toFloat(), buffer[0], 1e-6f)
-        assertEquals(VisionTuning().playerMinGreenScore, buffer[11], 1e-6f)
-        assertEquals(VisionTuning().playerMinSaturation, buffer[12], 1e-6f)
-        assertEquals(VisionTuning().playerAnchorX, buffer[17], 1e-6f)
-        assertEquals(VisionTuning().playerAnchorY, buffer[18], 1e-6f)
-        assertEquals(VisionTuning().enemyMinRedScore, buffer[21], 1e-6f)
-        assertEquals(VisionTuning().enemyMinSaturation, buffer[22], 1e-6f)
-        assertEquals(VisionTuning().trackMinHitsForProjectile.toFloat(), buffer[33], 1e-6f)
-        assertEquals(VisionTuning().lethalTtiSec, buffer[39], 1e-6f)
-        assertEquals(VisionTuning().escapeStepNorm, buffer[42], 1e-6f)
+        // The four object-classification fields were inserted mid-list, which is
+        // exactly the kind of change this test exists to catch.
+        val t = VisionTuning()
+        assertEquals(t.motionMaxShiftHalfRes.toFloat(), buffer[0], 1e-6f)
+        assertEquals(t.playerMinGreenScore, buffer[11], 1e-6f)
+        assertEquals(t.playerMinSaturation, buffer[12], 1e-6f)
+        assertEquals(t.playerAnchorX, buffer[17], 1e-6f)
+        assertEquals(t.enemyMinRedScore, buffer[21], 1e-6f)
+        assertEquals(t.enemyMinSaturation, buffer[22], 1e-6f)
+        assertEquals(t.ballMinArea.toFloat(), buffer[28], 1e-6f)
+        assertEquals(t.bouncerMaxArea.toFloat(), buffer[29], 1e-6f)
+        assertEquals(t.bouncerDotThreshold, buffer[30], 1e-6f)
+        assertEquals(t.kindMinHitsBeforeLabelling.toFloat(), buffer[31], 1e-6f)
+        assertEquals(t.trackGatePixels, buffer[32], 1e-6f)
+        assertEquals(t.trackMinHitsForProjectile.toFloat(), buffer[37], 1e-6f)
+        assertEquals(t.lethalTtiSec, buffer[43], 1e-6f)
+        assertEquals(t.escapeStepNorm, buffer[46], 1e-6f)
+        assertEquals(t.characterSpeedNorm, buffer[47], 1e-6f)
     }
 
     @Test
@@ -152,6 +160,27 @@ class NativeVisionEngineContractTest {
         assertEquals(0.29f, t.imminentTtiSec, 1e-6f)
         assertEquals(0.070f, t.escapeStepNorm, 1e-6f)
         assertEquals(0.67f, t.characterSpeedNorm, 1e-6f)
+    }
+
+    @Test
+    fun `the int output block is large enough for the classification counts`() {
+        // A short buffer means SetIntArrayRegion is skipped entirely and the
+        // counts silently read as zero, so the size is part of the contract.
+        assertTrue(
+            "OUT_INTS must cover ball/bouncer/enemy/dropped counters",
+            NativeVisionEngine.OUT_INTS >= 13
+        )
+        val result = VisionResult(FloatArray(24), IntArray(NativeVisionEngine.OUT_INTS).also {
+            it[8] = 2; it[9] = 1; it[12] = 4
+        })
+        assertEquals(2, result.ballCount)
+        assertEquals(1, result.bouncerCount)
+        assertEquals(4, result.enemyCount)
+    }
+
+    @Test
+    fun `the track readback stride matches the native float count`() {
+        assertEquals(7, NativeVisionEngine.TRACK_FLOATS)
     }
 
     @Test

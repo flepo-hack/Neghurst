@@ -1195,10 +1195,26 @@ void VisionEngine::updateTracks() {
         const float straight = clampf(1.0f - dev / tolerance, 0.0f, 1.0f);
         t.straightness = t.straightness * 0.55f + straight * 0.45f;
 
+        // A bouncer reverses: the newly observed direction is close to
+        // anti-parallel to what was predicted. Measured against the PRE-update
+        // velocity, since the Kalman gain has already absorbed part of the turn
+        // by this point and would mask it.
+        const float prevSpeed = std::hypot(predictedVx, predictedVy);
+        const float obsSpeed = std::hypot(obsVx, obsVy);
+        if (prevSpeed > 40.0f && obsSpeed > 40.0f) {
+            const float cosang = (predictedVx * obsVx + predictedVy * obsVy) /
+                                 (prevSpeed * obsSpeed);
+            if (cosang < cfg_.bouncerDotThreshold) t.bounced = true;
+        }
+
+        const float area = static_cast<float>(blobs_[static_cast<size_t>(best)].area);
+        t.areaEma = (t.hits <= 1) ? area : (t.areaEma * 0.6f + area * 0.4f);
+
         t.hits++;
         t.misses = 0;
         t.lastSeenNanos = runPts_;
         t.speedNorm = std::hypot(t.vx, t.vy) / screenW;
+        t.straightnessNorm = t.straightness;
         t.isProjectile = (t.hits >= cfg_.trackMinHitsForProjectile) &&
                          (t.speedNorm >= cfg_.projectileMinSpeedNorm) &&
                          (t.straightness >= cfg_.projectileMinStraightness);
@@ -1215,6 +1231,8 @@ void VisionEngine::updateTracks() {
         t.hits = 0;
         t.misses = 0;
         t.alive = true;
+        t.spawnArea = blobs_[i].area;
+        t.areaEma = static_cast<float>(blobs_[i].area);
         t.lastSeenNanos = runPts_;
         tracks_.push_back(t);
     }
@@ -1222,6 +1240,35 @@ void VisionEngine::updateTracks() {
     tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
                                  [&](const Track& t) { return t.misses > cfg_.trackMaxMisses; }),
                   tracks_.end());
+
+    // --- classify, only once a track has enough history to be sure -----------
+    // Deliberately after the gates above: labelling must not be able to change
+    // whether something is treated as a threat, only what it is called.
+    stats_.ballCount = 0;
+    stats_.bouncerCount = 0;
+    for (Track& t : tracks_) {
+        if (t.hits < cfg_.kindMinHitsBeforeLabelling) {
+            t.kind = TrackKind::kUnknown;
+            continue;
+        }
+        // A hard reversal is decisive: the object changed direction, so it is a
+        // bouncer regardless of size.
+        if (t.bounced) {
+            t.kind = TrackKind::kBouncer;
+        } else if (t.areaEma >= static_cast<float>(cfg_.ballMinArea)) {
+            // Big and consistent. The ball is the only large, steadily moving
+            // object in Brawl Ball mode.
+            t.kind = TrackKind::kBall;
+        } else if (t.areaEma <= static_cast<float>(cfg_.bouncerMaxArea) &&
+                   t.straightness >= cfg_.projectileMinStraightness &&
+                   t.speedNorm >= cfg_.projectileMinSpeedNorm) {
+            t.kind = TrackKind::kProjectile;
+        } else {
+            t.kind = TrackKind::kUnknown;
+        }
+        if (t.kind == TrackKind::kBall) ++stats_.ballCount;
+        if (t.kind == TrackKind::kBouncer) ++stats_.bouncerCount;
+    }
 
     stats_.trackCount = static_cast<int>(tracks_.size());
     stats_.projectileCount = 0;
@@ -1328,6 +1375,10 @@ void VisionEngine::solveThreat() {
 
     for (const Track& t : tracks_) {
         if (!t.isProjectile) continue;
+        // A bouncer reflects off walls, so the straight-line CPA is wrong and
+        // dodging "away from it" can be worse than doing nothing. It is
+        // reported, not acted on.
+        if (t.kind == TrackKind::kBouncer) continue;
         const float vLen = std::hypot(t.vx, t.vy);
         if (vLen < 1e-3f) continue;
 

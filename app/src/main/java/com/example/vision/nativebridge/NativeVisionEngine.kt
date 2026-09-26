@@ -30,15 +30,21 @@ class NativeVisionEngine(
         const val OUT_FLOATS = 24
 
         /** Number of ints the native layer writes. Must match `kOutIntCount`. */
-        const val OUT_INTS = 8
+        const val OUT_INTS = 13
 
         /** Must match `kExpected` in `nativeConfigure`. */
-        const val CONFIG_FLOATS = 44
+        const val CONFIG_FLOATS = 48
 
         const val MAX_MASKS = 8
         const val MAX_BLOBS = 48
         const val MAX_ENEMIES = 10
         const val MAX_TRACKS = 16
+
+        /**
+         * Floats per track in [readTracks]: x, y, vx, vy, speedNorm, isProjectile,
+         * kind. Must match `kTrackFloats` on the native side.
+         */
+        const val TRACK_FLOATS = 7
 
         private val libraryLoaded: Boolean by lazy {
             try {
@@ -66,7 +72,7 @@ class NativeVisionEngine(
     private val maskBuffer = FloatArray(5 * MAX_MASKS)
     private val blobBuffer = FloatArray(4 * MAX_BLOBS)
     private val enemyBuffer = FloatArray(3 * MAX_ENEMIES)
-    private val trackBuffer = FloatArray(6 * MAX_TRACKS)
+    private val trackBuffer = FloatArray(TRACK_FLOATS * MAX_TRACKS)
 
     val isOpen: Boolean get() = handle != 0L
 
@@ -178,11 +184,15 @@ class NativeVisionEngine(
         return enemyBuffer.copyOf(n * 3)
     }
 
-    /** Tracks. Each entry is (x, y, vx, vy, speedNorm, isProjectile). */
+    /**
+     * Tracks. Each entry is
+     * (x, y, vx, vy, speedNorm, isProjectile, kind) with kind a
+     * [com.example.vision.nativebridge.TrackKind] code.
+     */
     fun readTracks(): FloatArray {
         if (!isOpen) return FloatArray(0)
         val n = nativeCopyTracks(handle, trackBuffer, MAX_TRACKS)
-        return trackBuffer.copyOf(n * 6)
+        return trackBuffer.copyOf(n * TRACK_FLOATS)
     }
 
     /** Wall clock cost of the last native pipeline run, in milliseconds. */

@@ -971,6 +971,9 @@ class RenderaOverlayService : Service() {
             playerLocked = analysis.playerDetected,
             playerFromAnchor = analysis.playerFromAnchor,
             projectiles = analysis.projectileCount,
+            balls = analysis.raw.ballCount,
+            bouncers = analysis.raw.bouncerCount,
+            enemies = analysis.enemyCount,
             // Use the Kotlin solver's severity, not the native one. The Kotlin
             // solve produced the plan that is actually dispatched, so it is the
             // authoritative answer; reading the native value here could colour
@@ -1320,7 +1323,15 @@ class RenderaOverlayService : Service() {
     private fun showCalibrationOverlay() {
         if (calibrationView != null) return
         resolveDisplayGeometry()
-        anchors = prefs.anchorsFor(displayWidth, displayHeight)
+        // Start from whatever the user last committed; if nothing is committed,
+        // start from the game's actual HUD layout so the crosshair lands on the
+        // stick to begin with instead of in a corner.
+        val committed = prefs.currentAnchors()
+        anchors = if (committed.calibrated && committed.matchesDisplay(displayWidth, displayHeight)) {
+            committed
+        } else {
+            AnchorCalibrator.suggestJoystick(displayWidth, displayHeight)
+        }
 
         val view = CalibrationOverlayView(
             context = this,

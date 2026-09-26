@@ -105,6 +105,16 @@ struct EngineConfig {
     // --- tracking ---
     int maxTracks = 16;
     int maxObservations = 48;
+    // --- object classification (label only; does not affect threat detection) ---
+    // Grid cells. A bullet is a few cells across once the motion residual has
+    // eaten its tail; the ball is a large blob because it is a big rolling
+    // sphere, not a sprite the size of a bullet.
+    int ballMinArea = 14;
+    int bouncerMaxArea = 26;
+    // A bouncer reverses hard: the new velocity is nearly anti-parallel to the
+    // previous one. A straight shot never does that by accident.
+    float bouncerDotThreshold = -0.55f;
+    int kindMinHitsBeforeLabelling = 3;
     float trackGatePixels = 90.0f;       // in screen pixels
     float trackProcessPos = 3.0f;
     float trackProcessVel = 240.0f;
@@ -162,8 +172,37 @@ struct Blob {
     float peakStrength = 0.0f;
 };
 
+/**
+ * What a tracked object most likely is.
+ *
+ * This is a LABEL on an existing track, not a separate tracker. A second set of
+ * detection gates for the ball would mean a second set of thresholds that can
+ * interact badly with projectile detection, and projectile detection is what
+ * keeps the brawler alive. Classifying after the fact cannot regress dodging:
+ * the gates that decide "is this a threat" are untouched.
+ */
+enum class TrackKind : int {
+    kUnknown = 0,
+    /** Small, fast, constant velocity. The thing that can kill you. */
+    kProjectile = 1,
+    /**
+     * The Brawl Ball. Much larger than a projectile, rolls along the ground, and
+     * is the win condition, so knowing where it is matters even when it is not
+     * an immediate threat.
+     */
+    kBall = 2,
+    /**
+     * A bouncer: a shot that reflects off walls, so its velocity reverses
+     * without the object changing identity. Recognising it matters because the
+     * CPA solution is wrong for it and it should not be dodged as if it were a
+     * straight shot.
+     */
+    kBouncer = 3
+};
+
 struct Track {
     int id = 0;
+    TrackKind kind = TrackKind::kUnknown;
     float x = 0.0f;           // screen pixels
     float y = 0.0f;
     float vx = 0.0f;
@@ -171,9 +210,17 @@ struct Track {
     // Symmetric 2x2 covariance per axis: [[p00,p01],[p01,p11]]
     float pxx00 = 400.0f, pxx01 = 0.0f, pxx11 = 900.0f;
     float pyy00 = 400.0f, pyy01 = 0.0f, pyy11 = 900.0f;
+    /** Blob area at first sight, in grid cells. Sets the size class. */
+    int spawnArea = 0;
+    /** Smoothed blob area, used to keep the label stable. */
+    float areaEma = 0.0f;
     int hits = 0;
     int misses = 0;
     bool isProjectile = false;
+    /** Set when the velocity reversed since the previous observation. */
+    bool bounced = false;
+    /** 0..1 straightness of the velocity, as reported to the solver. */
+    float straightnessNorm = 0.0f;
     float straightness = 0.0f;  // 1 = perfectly constant velocity
     float speedNorm = 0.0f;     // screen widths per second
     uint64_t lastSeenNanos = 0;
@@ -231,6 +278,8 @@ struct FrameStats {
     int blobCount = 0;
     int trackCount = 0;
     int projectileCount = 0;
+    int ballCount = 0;
+    int bouncerCount = 0;
     int droppedFrames = 0;
 };
 

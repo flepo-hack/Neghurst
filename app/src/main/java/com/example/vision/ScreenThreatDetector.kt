@@ -302,7 +302,12 @@ class ScreenThreatDetector(
             processMillis = engine.lastProcessMillis(),
             blobCount = result.blobCount,
             projectileCount = result.projectileCount,
-            enemyCount = debugEnemies.size / 3
+            ballCount = result.ballCount,
+            bouncerCount = result.bouncerCount,
+            // The engine classifies enemies every frame; `debugEnemies` is only
+            // copied out when the HUD is on, so counting the debug array here
+            // would report zero most of the time.
+            enemyCount = result.enemyCount
         )
     }
 

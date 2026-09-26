@@ -56,6 +56,11 @@ data class VisionTuning(
     // --- tracking ---
     val maxTracks: Int = 16,
     val maxObservations: Int = 48,
+    // --- object classification (label only; does not affect threat detection) ---
+    val ballMinArea: Int = 14,
+    val bouncerMaxArea: Int = 26,
+    val bouncerDotThreshold: Float = -0.55f,
+    val kindMinHitsBeforeLabelling: Int = 3,
     val trackGatePixels: Float = 90f,
     val trackProcessPos: Float = 3f,
     val trackProcessVel: Float = 240f,
@@ -113,6 +118,10 @@ data class VisionTuning(
         dst[i++] = enemyAvoidRadiusNorm
         dst[i++] = maxTracks.toFloat()
         dst[i++] = maxObservations.toFloat()
+        dst[i++] = ballMinArea.toFloat()
+        dst[i++] = bouncerMaxArea.toFloat()
+        dst[i++] = bouncerDotThreshold
+        dst[i++] = kindMinHitsBeforeLabelling.toFloat()
         dst[i++] = trackGatePixels
         dst[i++] = trackProcessPos
         dst[i++] = trackProcessVel
@@ -130,6 +139,63 @@ data class VisionTuning(
         dst[i++] = escapeStepNorm
         dst[i] = characterSpeedNorm
     }
+}
+
+/**
+ * What a tracked object most likely is.
+ *
+ * This is a label applied to a track after it has already passed the projectile
+ * gates, so it describes what something is without changing whether it is
+ * treated as a threat. Only [kProjectile] objects can trigger a dodge.
+ */
+enum class TrackKind(val code: Int) {
+    /** Not enough history yet to say. */
+    UNKNOWN(0),
+
+    /** Small, fast, constant velocity: the thing that can kill you. */
+    PROJECTILE(1),
+
+    /** The Brawl Ball: large, rolling, and the win condition. */
+    BALL(2),
+
+    /**
+     * A wall bouncer. Its straight-line closest-approach is wrong, so it is
+     * reported but deliberately not acted on.
+     */
+    BOUNCER(3);
+
+    companion object {
+        fun fromCode(code: Int): TrackKind = when (code) {
+            1 -> PROJECTILE
+            2 -> BALL
+            3 -> BOUNCER
+            else -> UNKNOWN
+        }
+    }
+}
+
+/** One tracked object, as returned by [NativeVisionEngine.readTracks]. */
+class TrackReading(private val f: FloatArray, private val offset: Int) {
+    val x: Float get() = f[offset]
+    val y: Float get() = f[offset + 1]
+    val vx: Float get() = f[offset + 2]
+    val vy: Float get() = f[offset + 3]
+    val speedNorm: Float get() = f[offset + 4]
+    val isProjectile: Boolean get() = f[offset + 5] > 0.5f
+    val kind: TrackKind get() = TrackKind.fromCode(f[offset + 6].toInt())
+
+    /**
+     * How dangerous this specific object is, in screen pixels. Only projectiles
+     * are dangerous; a bouncer's straight-line solution is meaningless.
+     */
+    val isActionable: Boolean get() = isProjectile && kind != TrackKind.BOUNCER
+}
+
+/** Decodes a [NativeVisionEngine.readTracks] array into [TrackReading]s. */
+fun FloatArray.toTrackReadings(): List<TrackReading> {
+    val stride = NativeVisionEngine.TRACK_FLOATS
+    if (size < stride) return emptyList()
+    return List(size / stride) { TrackReading(this, it * stride) }
 }
 
 /**
@@ -229,6 +295,21 @@ class VisionResult(
     val escapeSufficient: Boolean = i[6] != 0
 
     val severity: ThreatSeverity get() = ThreatSeverity.fromCode(severityRaw)
+
+    /** Tracks classified as the Brawl Ball. */
+    val ballCount: Int get() = i[8]
+
+    /** Tracks classified as wall-bouncing shots. */
+    val bouncerCount: Int get() = i[9]
+
+    /** Enemy marks found in the world-anchored frame. Counted every frame. */
+    val enemyCount: Int get() = i[12]
+
+    /** Frames the engine has processed since the last reset. */
+    val framesProcessed: Int get() = i[10]
+
+    /** Frames dropped by the capture ring since the last reset. */
+    val droppedFrames: Int get() = i[11]
 
     val timeToImpactMs: Long get() = (timeToImpactSec * 1000f).toLong()
 }

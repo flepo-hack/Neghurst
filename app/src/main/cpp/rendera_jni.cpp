@@ -20,7 +20,10 @@
 namespace {
 
 constexpr jint kOutFloatCount = 24;
-constexpr jint kOutIntCount = 8;
+constexpr jint kOutIntCount = 13;
+
+/** Floats per track in nativeCopyTracks: x, y, vx, vy, speedNorm, isProjectile, kind. */
+constexpr jint kTrackFloats = 7;
 
 struct Session {
     std::unique_ptr<rendera::VisionEngine> engine;
@@ -91,57 +94,61 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     // The Kotlin side is the single source of truth for tuning, so the whole set
     // is transferred explicitly and atomically. Any layout change must bump
     // CONFIG_FLOATS on the Kotlin side too.
-    constexpr jsize kExpected = 44;
+    constexpr jsize kExpected = 48;
     if (env->GetArrayLength(cfg) < kExpected) return;
 
     jfloat* p = env->GetFloatArrayElements(cfg, nullptr);
     if (p == nullptr) return;
 
     rendera::EngineConfig c = e->config();
-    c.motionMaxShiftHalfRes        = static_cast<int>(p[0]);
-    c.motionMinConfidence          = p[1];
-    c.fineRefineRadius             = static_cast<int>(p[2]);
-    c.diffNoiseFloor               = static_cast<uint8_t>(p[3]);
-    c.diffStrongThreshold          = static_cast<uint8_t>(p[4]);
-    c.blobMinArea                  = static_cast<int>(p[5]);
-    c.blobMaxArea                  = static_cast<int>(p[6]);
-    c.blobMinFill                  = p[7];
-    c.blobMinMeanStrength          = p[8];
-    c.playerMinComponentArea       = static_cast<int>(p[9]);
-    c.playerMaxComponentArea       = static_cast<int>(p[10]);
-    c.playerMinGreenScore          = p[11];
-    c.playerMinSaturation          = p[12];
-    c.playerMinCompactness         = p[13];
-    c.playerMaxAspect              = p[14];
-    c.playerGateGridUnits          = p[15];
-    c.playerAnchorLocked           = p[16] != 0.0f;
-    c.playerAnchorX                = p[17];
-    c.playerAnchorY                = p[18];
-    c.enemyMinComponentArea        = static_cast<int>(p[19]);
-    c.enemyMaxComponentArea        = static_cast<int>(p[20]);
-    c.enemyMinRedScore             = p[21];
-    c.enemyMinSaturation           = p[22];
-    c.enemyMinCompactness          = p[23];
-    c.maxEnemies                   = static_cast<int>(p[24]);
-    c.enemyAvoidRadiusNorm         = p[25];
-    c.maxTracks                    = static_cast<int>(p[26]);
-    c.maxObservations              = static_cast<int>(p[27]);
-    c.trackGatePixels              = p[28];
-    c.trackProcessPos              = p[29];
-    c.trackProcessVel              = p[30];
-    c.trackMeasureNoise            = p[31];
-    c.trackMaxMisses               = static_cast<int>(p[32]);
-    c.trackMinHitsForProjectile    = static_cast<int>(p[33]);
-    c.projectileMinSpeedNorm       = p[34];
-    c.projectileMinStraightness    = p[35];
-    c.playerRadiusNorm             = p[36];
-    c.projectileRadiusNorm         = p[37];
-    c.reactionHorizonSec           = p[38];
-    c.lethalTtiSec                 = p[39];
-    c.imminentTtiSec               = p[40];
-    c.escapeCandidateCount         = static_cast<int>(p[41]);
-    c.escapeStepNorm               = p[42];
-    c.characterSpeedNorm           = p[43];
+    c.motionMaxShiftHalfRes         = static_cast<int>(p[0]);
+    c.motionMinConfidence           = p[1];
+    c.fineRefineRadius              = static_cast<int>(p[2]);
+    c.diffNoiseFloor                = static_cast<uint8_t>(p[3]);
+    c.diffStrongThreshold           = static_cast<uint8_t>(p[4]);
+    c.blobMinArea                   = static_cast<int>(p[5]);
+    c.blobMaxArea                   = static_cast<int>(p[6]);
+    c.blobMinFill                   = p[7];
+    c.blobMinMeanStrength           = p[8];
+    c.playerMinComponentArea        = static_cast<int>(p[9]);
+    c.playerMaxComponentArea        = static_cast<int>(p[10]);
+    c.playerMinGreenScore           = p[11];
+    c.playerMinSaturation           = p[12];
+    c.playerMinCompactness          = p[13];
+    c.playerMaxAspect               = p[14];
+    c.playerGateGridUnits           = p[15];
+    c.playerAnchorLocked            = p[16] != 0.0f;
+    c.playerAnchorX                 = p[17];
+    c.playerAnchorY                 = p[18];
+    c.enemyMinComponentArea         = static_cast<int>(p[19]);
+    c.enemyMaxComponentArea         = static_cast<int>(p[20]);
+    c.enemyMinRedScore              = p[21];
+    c.enemyMinSaturation            = p[22];
+    c.enemyMinCompactness           = p[23];
+    c.maxEnemies                    = static_cast<int>(p[24]);
+    c.enemyAvoidRadiusNorm          = p[25];
+    c.maxTracks                     = static_cast<int>(p[26]);
+    c.maxObservations               = static_cast<int>(p[27]);
+    c.ballMinArea                   = static_cast<int>(p[28]);
+    c.bouncerMaxArea                = static_cast<int>(p[29]);
+    c.bouncerDotThreshold           = p[30];
+    c.kindMinHitsBeforeLabelling    = static_cast<int>(p[31]);
+    c.trackGatePixels               = p[32];
+    c.trackProcessPos               = p[33];
+    c.trackProcessVel               = p[34];
+    c.trackMeasureNoise             = p[35];
+    c.trackMaxMisses                = static_cast<int>(p[36]);
+    c.trackMinHitsForProjectile     = static_cast<int>(p[37]);
+    c.projectileMinSpeedNorm        = p[38];
+    c.projectileMinStraightness     = p[39];
+    c.playerRadiusNorm              = p[40];
+    c.projectileRadiusNorm          = p[41];
+    c.reactionHorizonSec            = p[42];
+    c.lethalTtiSec                  = p[43];
+    c.imminentTtiSec                = p[44];
+    c.escapeCandidateCount          = static_cast<int>(p[45]);
+    c.escapeStepNorm                = p[46];
+    c.characterSpeedNorm            = p[47];
 
     e->setConfig(c);
     env->ReleaseFloatArrayElements(cfg, p, JNI_ABORT);
@@ -149,7 +156,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
 
 JNIEXPORT void JNICALL
 Java_com_example_vision_nativebridge_NativeVisionEngine_nativeSetMask(
-        JNIEnv*, jobject thiz, jlong handle, jfloatArray mask) {
+        JNIEnv* env, jobject thiz, jlong handle, jfloatArray mask) {
     auto* e = asEngine(handle);
     if (e == nullptr) return;
     if (mask == nullptr) {
@@ -280,6 +287,13 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
     i32[5] = th.trackId;
     i32[6] = th.escape.sufficient ? 1 : 0;
     i32[7] = pl.componentArea;
+    i32[8] = st.ballCount;
+    i32[9] = st.bouncerCount;
+    i32[10] = static_cast<int>(st.framesProcessed);
+    i32[11] = static_cast<int>(st.droppedFrames);
+    // Enemy marks are classified every frame, not only when the debug HUD is
+    // on, so the readout cannot silently report zero.
+    i32[12] = static_cast<int>(e->enemies().size());
 
     if (outF != nullptr && env->GetArrayLength(outF) >= kOutFloatCount) {
         env->SetFloatArrayRegion(outF, 0, kOutFloatCount, f);
@@ -347,22 +361,24 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeCopyTracks(
     auto* e = asEngine(handle);
     if (e == nullptr || out == nullptr) return 0;
     const jsize cap = env->GetArrayLength(out);
-    const jint n = std::min<jsize>(static_cast<jsize>(maxItems), cap / 6);
+    const jint n = std::min<jsize>(static_cast<jsize>(maxItems), cap / kTrackFloats);
     if (n <= 0) return 0;
 
     const auto& tracks = e->tracks();
     const jint count = std::min(n, static_cast<jint>(tracks.size()));
-    std::vector<float> tmp(static_cast<size_t>(count) * 6);
+    std::vector<float> tmp(static_cast<size_t>(count) * kTrackFloats);
     for (jint i = 0; i < count; ++i) {
         const auto& t = tracks[static_cast<size_t>(i)];
-        tmp[static_cast<size_t>(i) * 6 + 0] = t.x;
-        tmp[static_cast<size_t>(i) * 6 + 1] = t.y;
-        tmp[static_cast<size_t>(i) * 6 + 2] = t.vx;
-        tmp[static_cast<size_t>(i) * 6 + 3] = t.vy;
-        tmp[static_cast<size_t>(i) * 6 + 4] = t.speedNorm;
-        tmp[static_cast<size_t>(i) * 6 + 5] = t.isProjectile ? 1.0f : 0.0f;
+        const size_t o = static_cast<size_t>(i) * kTrackFloats;
+        tmp[o + 0] = t.x;
+        tmp[o + 1] = t.y;
+        tmp[o + 2] = t.vx;
+        tmp[o + 3] = t.vy;
+        tmp[o + 4] = t.speedNorm;
+        tmp[o + 5] = t.isProjectile ? 1.0f : 0.0f;
+        tmp[o + 6] = static_cast<float>(static_cast<int>(t.kind));
     }
-    env->SetFloatArrayRegion(out, 0, count * 6, tmp.data());
+    env->SetFloatArrayRegion(out, 0, count * kTrackFloats, tmp.data());
     return count;
 }
 

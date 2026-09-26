@@ -35,7 +35,7 @@ class TacticalHudView(context: Context) : View(context) {
         val label: String = ""
     )
 
-    enum class Kind { PLAYER, JOYSTICK, PROJECTILE, ENEMY, THREAT, ESCAPE }
+    enum class Kind { PLAYER, JOYSTICK, PROJECTILE, ENEMY, BALL, BOUNCER, THREAT, ESCAPE }
 
     /** Everything the HUD needs for one frame. */
     data class Snapshot(
@@ -46,6 +46,9 @@ class TacticalHudView(context: Context) : View(context) {
         val playerLocked: Boolean = false,
         val playerFromAnchor: Boolean = false,
         val projectiles: Int = 0,
+        val balls: Int = 0,
+        val bouncers: Int = 0,
+        val enemies: Int = 0,
         val threatSeverity: String = "SAFE",
         val timeToImpactMs: Long = 0L,
         val escapeHeadingDeg: Float = 0f,
@@ -151,7 +154,8 @@ class TacticalHudView(context: Context) : View(context) {
             s.playerFromAnchor -> "ANCHOR"
             else -> "SEARCH"
         } + "  joy ${if (s.anchorsCalibrated) "SET" else "UNSET"}"
-        lines += "proj ${s.projectiles}  thr ${s.threatSeverity}"
+        lines += "proj ${s.projectiles}  ball ${s.balls}  bnc ${s.bouncers}  foe ${s.enemies}"
+        lines += "thr ${s.threatSeverity}"
         if (s.threatSeverity != "SAFE") {
             lines += "tti ${s.timeToImpactMs}ms  esc ${s.escapeHeadingDeg.toInt()}deg" +
                 if (s.escapeSufficient) "" else " PARTIAL"
@@ -193,6 +197,8 @@ class TacticalHudView(context: Context) : View(context) {
                 Kind.PLAYER -> Color.argb(255, 5, 255, 161)
                 Kind.JOYSTICK -> Color.argb(200, 0, 240, 255)
                 Kind.PROJECTILE -> Color.argb(255, 255, 215, 0)
+                Kind.BALL -> Color.argb(255, 255, 140, 40)
+                Kind.BOUNCER -> Color.argb(180, 255, 150, 255)
                 Kind.ENEMY -> Color.argb(255, 255, 80, 80)
                 Kind.THREAT -> Color.argb(255, 255, 60, 60)
                 Kind.ESCAPE -> Color.argb(255, 157, 78, 221)
@@ -230,25 +236,46 @@ class TacticalHudView(context: Context) : View(context) {
         escapeY: Float,
         hasEscape: Boolean
     ): List<Entity> {
-        val out = ArrayList<Entity>(tracks.size / 6 + enemies.size / 3 + 4)
+        val stride = com.example.vision.nativebridge.NativeVisionEngine.TRACK_FLOATS
+        val out = ArrayList<Entity>(tracks.size / stride + enemies.size / 3 + 6)
         out += Entity(
             Kind.PLAYER, playerX, playerY, playerRadius,
             label = if (playerLocked) "PLAYER" else "PLAYER?"
         )
         out += Entity(Kind.JOYSTICK, joyX, joyY, joyRadius, label = "STICK")
         var i = 0
-        while (i + 5 < tracks.size) {
-            val isProjectile = tracks[i + 5] > 0.5f
+        while (i + stride - 1 < tracks.size) {
+            val kind = com.example.vision.nativebridge.TrackKind
+                .fromCode(tracks[i + 6].toInt())
+            val kindEntity = when (kind) {
+                com.example.vision.nativebridge.TrackKind.BALL -> Kind.BALL
+                com.example.vision.nativebridge.TrackKind.BOUNCER -> Kind.BOUNCER
+                com.example.vision.nativebridge.TrackKind.PROJECTILE -> Kind.PROJECTILE
+                com.example.vision.nativebridge.TrackKind.UNKNOWN ->
+                    if (tracks[i + 5] > 0.5f) Kind.PROJECTILE else Kind.ENEMY
+            }
             out += Entity(
-                kind = if (isProjectile) Kind.PROJECTILE else Kind.ENEMY,
+                kind = kindEntity,
                 x = tracks[i],
                 y = tracks[i + 1],
-                radius = dp(if (isProjectile) 16f else 10f),
+                radius = dp(
+                    when (kind) {
+                        com.example.vision.nativebridge.TrackKind.BALL -> 34f
+                        com.example.vision.nativebridge.TrackKind.BOUNCER -> 13f
+                        com.example.vision.nativebridge.TrackKind.PROJECTILE -> 16f
+                        else -> 10f
+                    }
+                ),
                 vx = tracks[i + 2],
                 vy = tracks[i + 3],
-                label = if (isProjectile) "AMMO" else "TRACK"
+                label = when (kind) {
+                    com.example.vision.nativebridge.TrackKind.BALL -> "BALL"
+                    com.example.vision.nativebridge.TrackKind.BOUNCER -> "BNC"
+                    com.example.vision.nativebridge.TrackKind.PROJECTILE -> "AMMO"
+                    else -> "TRK"
+                }
             )
-            i += 6
+            i += stride
         }
         var j = 0
         while (j + 2 < enemies.size) {

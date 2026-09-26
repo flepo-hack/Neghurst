@@ -213,6 +213,59 @@ object AnchorCalibrator {
     fun normalise(x: Float, y: Float, displayWidth: Int, displayHeight: Int): PointF =
         PointF(x / displayWidth, y / displayHeight)
 
+    /**
+     * Suggests a joystick anchor from the geometry alone.
+     *
+     * Brawl Stars pins the movement stick to the bottom corner of the landscape
+     * view, so the quadrant is not a guess. What the user actually has to supply
+     * is the exact centre, and that is what the calibration overlay is for: this
+     * function only removes the guesswork of where to put the crosshair, and it
+     * is always overridable.
+     *
+     * Both orientations are handled, and left-handed layouts are supported by
+     * passing [leftHanded], which mirrors the quadrant.
+     */
+    fun suggestJoystick(
+        displayWidth: Int,
+        displayHeight: Int,
+        leftHanded: Boolean = false
+    ): Anchors {
+        val landscape = displayWidth > displayHeight
+        val shortEdge = minOf(displayWidth, displayHeight)
+        val radiusNorm = (shortEdge * STICK_RADIUS_OF_SHORT_EDGE) / displayWidth
+
+        // Brawl Stars places the stick low and inboard of the corner. The exact
+        // fraction varies slightly by aspect ratio, so it is derived from the
+        // short edge rather than hard coded per resolution.
+        // The inset has to be at least the stick radius, or the virtual stick
+        // hangs off the edge and the drag target is unreachable. That is not a
+        // theoretical concern: on a narrow portrait display the radius is derived
+        // from the short edge while a 17% inset of that same narrow width is
+        // smaller than the radius.
+        val radiusPx = radiusNorm * displayWidth
+        val insetX = (displayWidth * 0.17f).coerceAtLeast(radiusPx)
+        val yFromBottom = (displayHeight * 0.24f).coerceAtLeast(radiusPx)
+        val x = if (leftHanded) displayWidth - insetX else insetX
+        val y = if (landscape) displayHeight - yFromBottom else displayHeight - yFromBottom * 0.8f
+
+        // Belt and braces: the resulting circle must fit, whatever the input.
+        val safeRadius = minOf(radiusPx, displayWidth / 2f, displayHeight / 2f)
+
+        return Anchors(
+            joystickX = x.coerceIn(safeRadius, displayWidth - safeRadius) / displayWidth,
+            joystickY = y.coerceIn(safeRadius, displayHeight - safeRadius) / displayHeight,
+            playerX = 0.5f,
+            playerY = if (landscape) 0.52f else 0.55f,
+            joystickRadiusNorm = radiusNorm,
+            // A suggestion is not a calibration. Marking it calibrated would let
+            // the vision engine trust an anchor nobody ever verified, which is
+            // the class of bug this whole class exists to prevent.
+            calibrated = false,
+            calibratedForWidth = displayWidth,
+            calibratedForHeight = displayHeight
+        )
+    }
+
     /** Whole percent, for compact HUD text. */
     fun describe(anchors: Anchors): String {
         val joyX = (anchors.joystickX * 100f).roundToInt()
