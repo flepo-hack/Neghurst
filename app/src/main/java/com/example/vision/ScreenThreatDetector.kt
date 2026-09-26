@@ -1,5 +1,6 @@
 package com.example.vision
 
+import com.example.model.ThreatLevel
 import com.example.model.ThreatVector
 import com.example.vision.nativebridge.NativeVisionEngine
 import com.example.vision.nativebridge.ScreenRegion
@@ -44,19 +45,27 @@ class ScreenThreatDetector(
 ) : AutoCloseable {
 
     companion object {
-        const val DEFAULT_GRID_WIDTH = 160
-        const val DEFAULT_GRID_HEIGHT = 90
+        const val DEFAULT_GRID_WIDTH = 200
+        const val DEFAULT_GRID_HEIGHT = 112
 
-        /** Grid aspect must track the capture aspect or coordinates skew. */
+        /**
+         * Grid aspect must track the capture aspect or every grid to screen
+         * mapping skews and positions land in the wrong place.
+         *
+         * The height is rounded to a multiple of 8 as well as 2, because
+         * `motH_ = gridH / 2` and the FFT pads `motH_` to the next power of two.
+         * Forcing a multiple of 8 keeps `motH_` a multiple of 4, so a small
+         * aspect change cannot jump the padded FFT height from 64 to 128 and
+         * double the correlation cost.
+         */
         fun gridForCapture(captureWidth: Int, captureHeight: Int): Pair<Int, Int> {
             if (captureWidth <= 0 || captureHeight <= 0) {
                 return DEFAULT_GRID_WIDTH to DEFAULT_GRID_HEIGHT
             }
             val target = DEFAULT_GRID_WIDTH
             val h = (target.toLong() * captureHeight / captureWidth).toInt()
-            // Keep the grid even and within a sane range; the FFT pads the rest.
-            val evenH = (h.coerceIn(48, 200) / 2) * 2
-            return target to evenH
+            val snapped = (h.coerceIn(56, 200) / 8) * 8
+            return target to snapped
         }
     }
 
@@ -319,12 +328,27 @@ class ScreenThreatDetector(
         if (!anchors.calibrated) return DodgeGesturePlanner.Plan(emptyList(), 0L, 0f, 0f)
 
         val stick = anchors.joystickPx(screenWidth, screenHeight)
+
+        // Pick the timing from the urgency of the threat. On a point blank shot
+        // the default 45 + 35 ms onset would consume most of the window before
+        // the stick had moved at all, so the imminent and lethal cases use the
+        // compressed press/drag.
+        val timing = when (analysis.escape.severity) {
+            ThreatLevel.LETHAL -> DodgeGesturePlanner.Timing().urgent()
+            ThreatLevel.IMMINENT_DANGER -> DodgeGesturePlanner.Timing(
+                pressMs = 28L,
+                dragMs = 24L
+            )
+            else -> DodgeGesturePlanner.Timing()
+        }
+
         return DodgeGesturePlanner.planFromSolution(
             solution = analysis.escape,
             stickX = stick.x,
             stickY = stick.y,
             screenWidthPx = screenWidth.toFloat(),
-            screenHeightPx = screenHeight.toFloat()
+            screenHeightPx = screenHeight.toFloat(),
+            timing = timing
         )
     }
 

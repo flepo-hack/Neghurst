@@ -68,8 +68,45 @@ class RenderaAccessibilityService : AccessibilityService() {
         private val _isServiceConnected = MutableStateFlow(false)
         val isServiceConnected: StateFlow<Boolean> = _isServiceConnected.asStateFlow()
 
+        private val _foregroundPackage = MutableStateFlow("")
+        val foregroundPackage: StateFlow<String> = _foregroundPackage.asStateFlow()
+
         /** True once the service is bound and can accept gestures. */
         fun isAvailable(): Boolean = instance != null
+
+        /**
+         * True when [targetPackage] is the app currently in the foreground.
+         *
+         * Detection over the launcher or a settings screen is pure noise: the
+         * tracker latches onto scrolling thumbnails and then the first real
+         * frame is read as a scene change, which dumps the tracks. An empty
+         * [targetPackage] means "no target configured", in which case this
+         * reports true and the caller falls back to its own check.
+         */
+        fun isTargetInForeground(targetPackage: String): Boolean {
+            // Either of these is "unknown", not "not foreground". Reporting
+            // unknown as false is the trap: the service can connect while the
+            // game is already focused, in which case no typeWindowStateChanged
+            // event ever fires for it, and the overlay would reset its history
+            // forever and never detect anything.
+            if (targetPackage.isEmpty()) return true
+            val current = _foregroundPackage.value
+            if (current.isEmpty()) return true
+            if (isSystemUi(current)) return true
+            return current == targetPackage
+        }
+
+        /**
+         * System UI (volume panel, notification shade, IME, permission dialogs)
+         * takes focus constantly and steals it back immediately. Treating it as
+         * "the game is no longer in front" would reset the detector mid-fight on
+         * a single volume key press, so it is deliberately not a target change.
+         */
+        private fun isSystemUi(pkg: String): Boolean =
+            pkg == "com.android.systemui" ||
+                pkg == "android" ||
+                pkg.startsWith("com.google.android.inputmethod") ||
+                pkg.startsWith("com.android.inputmethod")
 
         /**
          * True when nothing is in flight, i.e. a dispatch would be accepted right
@@ -121,7 +158,11 @@ class RenderaAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Intentionally empty. We dispatch gestures; we do not inspect the UI.
+        // The only thing read from an event is which package owns the focused
+        // window, and the service subscribes to `typeWindowStateChanged` alone
+        // precisely so this stays cheap. Nothing inspects window content.
+        val pkg = event?.packageName?.toString()
+        if (!pkg.isNullOrEmpty()) _foregroundPackage.value = pkg
     }
 
     override fun onInterrupt() {
@@ -133,6 +174,7 @@ class RenderaAccessibilityService : AccessibilityService() {
         if (instance === this) {
             instance = null
             _isServiceConnected.value = false
+            _foregroundPackage.value = ""
         }
         gestureBusy.set(false)
         Log.i(TAG, "Accessibility service destroyed")

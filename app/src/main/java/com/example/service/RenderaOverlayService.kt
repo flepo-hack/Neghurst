@@ -110,13 +110,17 @@ class RenderaOverlayService : Service() {
         private const val NOTIFICATION_ID = 4711
 
         /**
-         * Long edge of the captured image, in pixels. The engine downsamples to
-         * its own grid natively, so a larger capture buys no detection accuracy
-         * and only costs bandwidth; 480 is comfortably more than a 160-wide
-         * grid needs to resolve a small projectile. YUV_420_888 requires even
+         * Long edge of the captured image, in pixels.
+         *
+         * This is the real resolution limit of the whole pipeline: the engine
+         * downsamples to a 200 wide grid, so the capture must be at least that
+         * wide or the downsample throws information away. 640 gives a 2400x1080
+         * display a 3.75x reduction, which leaves a Brawl Stars bullet about 7
+         * capture pixels across and therefore 2-3 grid cells: enough to survive
+         * the noise floor and the minimum blob area. YUV_420_888 requires even
          * dimensions on both axes.
          */
-        private const val CAPTURE_LONG_EDGE_EVEN = 480
+        private const val CAPTURE_LONG_EDGE_EVEN = 640
 
         private const val VISION_IDLE_SLEEP_MS = 4L
         private const val STATS_INTERVAL_MS = 1000L
@@ -640,11 +644,20 @@ class RenderaOverlayService : Service() {
 
     private fun tuningFromPrefs(): VisionTuning {
         val sensitivity = prefs.sensitivity.value
-        // Higher sensitivity means reacting to fainter / smaller motion, which is
-        // exactly a lower noise floor and a lower speed gate.
+        // Higher sensitivity means reacting to fainter and slower things, which
+        // is a lower noise floor, a lower speed gate and a longer horizon.
+        //
+        // This is a LOWER bound, and the slider only moves it between 51 and 78
+        // on the 0..255 opponent scale. Brawl Stars' selection ring measures
+        // about 80 and a fully saturated green about 250, so the whole range
+        // keeps the real player detectable while still rejecting grass, which
+        // measures 47 on hue alone and 78 on saturation against a gate of 105.
+        // The heavy discrimination against terrain is the saturation gate in the
+        // engine, not this threshold.
         return VisionTuning(
             diffNoiseFloor = (26f - sensitivity * 12f).roundToInt().coerceIn(10, 26),
-            playerMinGreenScore = 40f + sensitivity * 50f,
+            playerMinGreenScore = 48f + sensitivity * 30f,
+            enemyMinRedScore = 40f + sensitivity * 26f,
             projectileMinSpeedNorm = 0.30f - sensitivity * 0.14f,
             projectileMinStraightness = 0.70f - sensitivity * 0.22f,
             reactionHorizonSec = 0.32f + sensitivity * 0.18f,
@@ -747,7 +760,20 @@ class RenderaOverlayService : Service() {
                             lastAnchors = liveAnchors
                         }
 
-                        val analysis = synchronized(detectorLock) { d.process(
+                        val analysis = if (!isTargetInForeground()) {
+                            // Outside the game, drop the history instead of
+                            // feeding the tracker whatever is on screen. A scene
+                            // change would otherwise be read as one enormous
+                            // motion event and dump every track. No `continue`
+                            // here: it would skip the statistics window below
+                            // and leave it stale for however long the app stays
+                            // backgrounded.
+                            synchronized(detectorLock) { d.reset() }
+                            // A stale analysis would let auto-detect calibrate
+                            // from a scene that no longer exists.
+                            latestAnalysis = null
+                            null
+                        } else synchronized(detectorLock) { d.process(
                             yPlane = frame.y,
                             yStride = frame.yStride,
                             uPlane = frame.u,
@@ -762,7 +788,7 @@ class RenderaOverlayService : Service() {
                             screenHeight = displayHeight,
                             collectDebug = prefs.debugOverlayEnabled.value
                         ) }
-                        onAnalysis(analysis, d)
+                        if (analysis != null) onAnalysis(analysis, d)
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "Vision frame failed", t)
@@ -780,6 +806,18 @@ class RenderaOverlayService : Service() {
                 }
             }
         }
+    }
+
+    /**
+     * True when the configured game is the app in the foreground.
+     *
+     * Falls back to "true" when the service is not connected or no target is
+     * configured, so a missing accessibility service does not silently stop
+     * detection; the HUD reports the real state separately.
+     */
+    private fun isTargetInForeground(): Boolean {
+        if (!RenderaAccessibilityService.isAvailable()) return true
+        return RenderaAccessibilityService.isTargetInForeground(prefs.targetPackage.value)
     }
 
     private fun onAnalysis(analysis: ScreenThreatDetector.Analysis?, d: ScreenThreatDetector) {
@@ -870,6 +908,7 @@ class RenderaOverlayService : Service() {
             anchorsCalibratedFor = "${anchors.calibratedForWidth}x${anchors.calibratedForHeight}",
             autoDodgeArmed = autoDodgeArmed,
             accessibilityReady = RenderaAccessibilityService.isAvailable(),
+            gameInForeground = isTargetInForeground(),
             activeGamePackage = prefs.targetPackage.value,
             latestTacticalAdvice = buildAdvice()
         )
@@ -880,6 +919,7 @@ class RenderaOverlayService : Service() {
         detector?.isNativeAvailable != true -> "Native vision engine missing from this build."
         !anchors.calibrated -> "Long press the bubble and lock the anchors."
         !RenderaAccessibilityService.isAvailable() -> "Enable the Rendera accessibility service."
+        !isTargetInForeground() -> "Waiting for ${prefs.targetPackage.value} to come forward."
         autoDodgeArmed -> "Armed. ${latestFps} fps, ${frameRing.droppedCount} frames dropped."
         else -> "Paused. Tap the bubble to arm."
     }
@@ -941,6 +981,7 @@ class RenderaOverlayService : Service() {
             escapeSufficient = esc.escapeIsSufficient,
             anchorsCalibrated = currentAnchors.calibrated,
             accessibilityReady = RenderaAccessibilityService.isAvailable(),
+            gameForeground = isTargetInForeground(),
             autoDodgeArmed = autoDodgeArmed,
             note = buildAdvice()
         )

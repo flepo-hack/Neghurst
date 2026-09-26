@@ -123,6 +123,7 @@ VisionEngine::VisionEngine(const EngineConfig& cfg) : cfg_(cfg) {
     prevLuma_.assign(static_cast<size_t>(totalCells_), 0);
     green_.assign(static_cast<size_t>(totalCells_), 0);
     red_.assign(static_cast<size_t>(totalCells_), 0);
+    sat_.assign(static_cast<size_t>(totalCells_), 0);
     diff_.assign(static_cast<size_t>(totalCells_), 0);
     valid_.assign(static_cast<size_t>(totalCells_), 0);
 
@@ -224,6 +225,7 @@ void VisionEngine::reset() {
     std::fill(prevLuma_.begin(), prevLuma_.end(), 0);
     std::fill(green_.begin(), green_.end(), 0);
     std::fill(red_.begin(), red_.end(), 0);
+    std::fill(sat_.begin(), sat_.end(), 0);
     std::fill(diff_.begin(), diff_.end(), 0);
     std::fill(valid_.begin(), valid_.end(), 0);
     std::fill(motCur_.begin(), motCur_.end(), 0);
@@ -293,20 +295,49 @@ void VisionEngine::downsampleFromYuv(const uint8_t* y, int yStride,
             for (int gx = 0; gx < gridW_; ++gx) {
                 int cx = gx * cStepX;
                 if (cx >= chromaW) cx = chromaW - 1;
-                const int cb = static_cast<int>(uRow[cx]) - 128;
-                const int cr = static_cast<int>(vRow[cx]) - 128;
-                // BT.601 chroma separation. Greenness and redness are the two
-                // opponent signals that actually matter in Brawl Stars: the
-                // player's selection ring / health bar versus enemy bars.
-                const int g = 2 * cr - cb;
-                const int r = 2 * cr + cb;
                 const size_t ci = static_cast<size_t>(outRow + gx);
-                green_[ci] = static_cast<uint8_t>(clampf(static_cast<float>(g) * 2.0f, 0.0f, 255.0f));
-                red_[ci] = static_cast<uint8_t>(clampf(static_cast<float>(r) * 2.0f, 0.0f, 255.0f));
+
+                // BT.601 studio-swing YUV -> normalised RGB. MediaProjection
+                // hands us video-range chroma, so the 16/219 and 128/224 offsets
+                // matter; skipping them skews every recovered channel.
+                // Reuse the luma already written to the grid for this cell: the
+                // source column index is scoped to the luma loop above.
+                const float yp =
+                    (static_cast<float>(luma_[ci]) - 16.0f) * (1.0f / 219.0f);
+                const float cb = (static_cast<float>(uRow[cx]) - 128.0f) * (1.0f / 224.0f);
+                const float cr = (static_cast<float>(vRow[cx]) - 128.0f) * (1.0f / 224.0f);
+
+                // Deliberately NOT clamped to 0..1 here, only the final 0..255
+                // score is. Measured over the real Brawl Stars palette the two
+                // forms agree, but clamping per channel is not safe in
+                // principle: a pixel whose R and G both exceed 1.0 (a vivid
+                // green ring is exactly that) would clamp to equality, and
+                // G - max(R, B) would collapse to zero, silently rejecting the
+                // brightest greens in the game. A difference of out of gamut
+                // values is harmless; a difference of clamped values is not.
+                const float r = yp + 1.402f * cr;
+                const float g = yp - 0.344136f * cb - 0.714136f * cr;
+                const float b = yp + 1.772f * cb;
+
+                const float mx = std::max(r, std::max(g, b));
+                const float mn = std::min(r, std::min(g, b));
+
+                // Opponent signals, not raw chroma. gOpponent = G - max(R, B) is
+                // positive only for a genuinely green pixel, and it is hue
+                // correct, which the previous (2*cr - cb) form was not.
+                const float gOpp = g - std::max(r, b);
+                const float rOpp = r - std::max(g, b);
+
+                green_[ci] = static_cast<uint8_t>(clampf(gOpp * kOpponentScale, 0.0f, 255.0f));
+                red_[ci] = static_cast<uint8_t>(clampf(rOpp * kOpponentScale, 0.0f, 255.0f));
+                // Saturation is what separates Brawl Stars' vivid selection ring
+                // (~240) from grass of the same hue (~80).
+                sat_[ci] = static_cast<uint8_t>(clampf((mx - mn) * kOpponentScale, 0.0f, 255.0f));
             }
         } else {
             std::memset(green_.data() + outRow, 0, static_cast<size_t>(gridW_));
             std::memset(red_.data() + outRow, 0, static_cast<size_t>(gridW_));
+            std::memset(sat_.data() + outRow, 0, static_cast<size_t>(gridW_));
         }
     }
 }
@@ -786,7 +817,11 @@ void VisionEngine::detectPlayer() {
     if (cfg_.playerAnchorLocked) {
         searchCx = cfg_.playerAnchorX * static_cast<float>(gridW_);
         searchCy = cfg_.playerAnchorY * static_cast<float>(gridH_);
-        gate = static_cast<float>(gridW_) * 0.34f;
+        // Scaled by the grid so the tuning field means the same thing at any
+        // resolution, and deliberately wider than the temporal prior: with a
+        // committed anchor there is no history to lean on, so the search window
+        // has to tolerate the calibration being slightly off.
+        gate = cfg_.playerGateGridUnits * 2.0f;
     } else if (player_.locked) {
         screenToGrid(player_.x, player_.y, searchCx, searchCy);
         gate = cfg_.playerGateGridUnits;
@@ -803,12 +838,16 @@ void VisionEngine::detectPlayer() {
     if (x1 <= x0 || y1 <= y0) return;
 
     const int thr = static_cast<int>(cfg_.playerMinGreenScore);
+    const int satThr = static_cast<int>(cfg_.playerMinSaturation);
     int32_t nextLabel = 0;
     for (int y = y0; y <= y1; ++y) {
         const size_t rowOff = static_cast<size_t>(y) * gridW_;
         for (int x = x0; x <= x1; ++x) {
             const size_t i = rowOff + static_cast<size_t>(x);
-            if (green_[i] < thr || maskBitmap_[i] != 0) {
+            // Both gates: hue AND saturation. Grass has the right hue at low
+            // saturation, and the selection ring has the hue at high saturation,
+            // so requiring both is what separates them.
+            if (green_[i] < thr || sat_[i] < satThr || maskBitmap_[i] != 0) {
                 labels_[i] = -1;
                 continue;
             }
@@ -869,6 +908,8 @@ void VisionEngine::detectPlayer() {
 
     float bestScore = -std::numeric_limits<float>::infinity();
     int bestRoot = -1;
+    float lockedBestDist = std::numeric_limits<float>::infinity();
+    int lockedBestRoot = -1;
     for (int l = 0; l < nextLabel; ++l) {
         const size_t r = static_cast<size_t>(l);
         const int area = blobArea_[r];
@@ -892,13 +933,24 @@ void VisionEngine::detectPlayer() {
         // distant candidate is scaled down hard, not merely disfavoured.
         float score = greenness * 0.6f + compactness * 120.0f;
         score *= 1.0f - 0.80f * (distCells / gate);
-        if (cfg_.playerAnchorLocked) score *= 1.4f;
+
+        if (cfg_.playerAnchorLocked) {
+            // A calibration the user committed to is authoritative, so pick the
+            // candidate NEAREST the anchor rather than the best scoring one. A
+            // weighted score still lets a big vivid patch outvote the ring the
+            // user actually locked onto.
+            if (distCells < lockedBestDist) {
+                lockedBestDist = distCells;
+                lockedBestRoot = l;
+            }
+        }
         if (score > bestScore) {
             bestScore = score;
             bestRoot = l;
         }
     }
 
+    if (cfg_.playerAnchorLocked && lockedBestRoot >= 0) bestRoot = lockedBestRoot;
     if (bestRoot < 0) {
         if (player_.framesSinceSeen > 12) player_.locked = false;
         return;
@@ -953,12 +1005,15 @@ void VisionEngine::detectEnemies() {
     enemies_.clear();
 
     const int thr = static_cast<int>(cfg_.enemyMinRedScore);
+    const int satThr = static_cast<int>(cfg_.enemyMinSaturation);
     int32_t nextLabel = 0;
     for (int y = 1; y < gridH_ - 1; ++y) {
         const size_t rowOff = static_cast<size_t>(y) * gridW_;
         for (int x = 1; x < gridW_ - 1; ++x) {
             const size_t i = rowOff + static_cast<size_t>(x);
-            if (red_[i] < thr || maskBitmap_[i] != 0) {
+            // The red opponent signal is negative for green, so a selection ring
+            // cannot be mistaken for an enemy even before the saturation gate.
+            if (red_[i] < thr || sat_[i] < satThr || maskBitmap_[i] != 0) {
                 labels_[i] = -1;
                 continue;
             }

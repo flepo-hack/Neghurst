@@ -115,12 +115,19 @@ class NativeVisionEngineContractTest {
         // tail would still be zero.
         assertEquals(VisionTuning().characterSpeedNorm, buffer.last(), 1e-6f)
 
-        // Spot check a few positions against the native read order.
+        // Spot check positions against the native read order. These indices are
+        // load bearing: nativeConfigure assigns p[N] positionally, so a drift
+        // here silently misapplies every tuning knob after the insertion point.
         assertEquals(VisionTuning().motionMaxShiftHalfRes.toFloat(), buffer[0], 1e-6f)
-        assertEquals(VisionTuning().playerAnchorX, buffer[16], 1e-6f)
-        assertEquals(VisionTuning().playerAnchorY, buffer[17], 1e-6f)
-        assertEquals(VisionTuning().lethalTtiSec, buffer[37], 1e-6f)
-        assertEquals(VisionTuning().escapeStepNorm, buffer[40], 1e-6f)
+        assertEquals(VisionTuning().playerMinGreenScore, buffer[11], 1e-6f)
+        assertEquals(VisionTuning().playerMinSaturation, buffer[12], 1e-6f)
+        assertEquals(VisionTuning().playerAnchorX, buffer[17], 1e-6f)
+        assertEquals(VisionTuning().playerAnchorY, buffer[18], 1e-6f)
+        assertEquals(VisionTuning().enemyMinRedScore, buffer[21], 1e-6f)
+        assertEquals(VisionTuning().enemyMinSaturation, buffer[22], 1e-6f)
+        assertEquals(VisionTuning().trackMinHitsForProjectile.toFloat(), buffer[33], 1e-6f)
+        assertEquals(VisionTuning().lethalTtiSec, buffer[39], 1e-6f)
+        assertEquals(VisionTuning().escapeStepNorm, buffer[42], 1e-6f)
     }
 
     @Test

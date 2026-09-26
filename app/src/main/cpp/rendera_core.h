@@ -42,9 +42,14 @@ namespace rendera {
 // ---------------------------------------------------------------------------
 
 struct EngineConfig {
-    // Working grid. Aspect must match the capture aspect within 4%.
-    int gridW = 160;
-    int gridH = 90;
+    // Working grid. Must track the capture aspect, or grid to screen positions
+    // skew and the reported player lands in the wrong place. 200x112 is the
+    // default: a cell is about 12x9.6 screen px on a 2400x1080 display, which is
+    // the smallest cell that still resolves a Brawl Stars bullet as a 2-3 cell
+    // blob. The half resolution motion plane is 100x56, which the FFT pads to
+    // 128x64, so this costs no extra correlation work.
+    int gridW = 200;
+    int gridH = 112;
 
     // --- global motion estimation ---
     int motionMaxShiftHalfRes = 24;  // +/- search range on the half res grid
@@ -66,20 +71,33 @@ struct EngineConfig {
     float blobMinMeanStrength = 22.0f;
 
     // --- player detection (world anchored, evaluated on the ALIGNED frame) ---
-    int playerMinComponentArea = 6;
+    //
+    // Scores are opponent signals: G - max(R,B) for green, R - max(G,B) for red,
+    // both scaled by OPPONENT_SCALE and clamped to 0..255. These are scale free
+    // and hue correct. The previous formula (2*cr - cb on raw chroma) is inverted:
+    // it returns NEGATIVE greenness for saturated green, so the player detector
+    // could never fire on an actual selection ring, while reporting purple and
+    // blue UI elements as "red".
+    //
+    // The saturation gate is the second half of the discrimination. Brawl Stars'
+    // selection ring scores around 240 while grass sits near 80, so requiring
+    // saturation rejects terrain that passes the greenness test on hue alone.
+    int playerMinComponentArea = 8;
     int playerMaxComponentArea = 900;
-    float playerMinGreenScore = 70.0f;   // 0..255 greenness of the component
-    float playerMinCompactness = 0.22f;  // area / bbox area, rejects grass blobs
+    float playerMinGreenScore = 58.0f;   // 0..255 greenness of the component
+    float playerMinSaturation = 105.0f;  // 0..255 max(RGB) - min(RGB)
+    float playerMinCompactness = 0.20f;  // area / bbox area
     float playerMaxAspect = 4.5f;        // rejects wide scenery runs
-    float playerGateGridUnits = 46.0f;   // search radius around the prior
+    float playerGateGridUnits = 34.0f;   // search radius around the prior (grid cells)
     bool playerAnchorLocked = false;     // honour the calibrated anchor exactly
     float playerAnchorX = 0.5f;          // normalised screen coords
     float playerAnchorY = 0.5f;
 
     // --- enemy detection (world anchored, evaluated on the ALIGNED frame) ---
-    int enemyMinComponentArea = 4;
+    int enemyMinComponentArea = 5;
     int enemyMaxComponentArea = 700;
-    float enemyMinRedScore = 64.0f;
+    float enemyMinRedScore = 55.0f;
+    float enemyMinSaturation = 105.0f;
     float enemyMinCompactness = 0.18f;
     int maxEnemies = 10;
     float enemyAvoidRadiusNorm = 0.11f;  // screen widths the escape must keep clear
@@ -92,7 +110,10 @@ struct EngineConfig {
     float trackProcessVel = 240.0f;
     float trackMeasureNoise = 260.0f;
     int trackMaxMisses = 5;
-    int trackMinHitsForProjectile = 3;
+    // 2, not 3. At 60 fps a third hit costs 50 ms, and close range bullets
+    // in Brawl Stars arrive in well under 100 ms, so waiting for a third
+    // observation would mean reacting after the shot had already landed.
+    int trackMinHitsForProjectile = 2;
     float projectileMinSpeedNorm = 0.22f; // fraction of screen width per second
     float projectileMinStraightness = 0.55f;
 
@@ -213,6 +234,17 @@ struct FrameStats {
     int droppedFrames = 0;
 };
 
+/**
+ * Scale applied to a normalized opponent signal to reach the 0..255 range the
+ * thresholds are expressed in.
+ *
+ * A fully saturated colour gives an opponent value of 1.0, so everything above
+ * `255 / kOpponentScale` = 0.64 clips. That is intentional: these are gates, not
+ * measurements, and a vivid selection ring should not need a more precise
+ * reading than "well past the bar".
+ */
+constexpr float kOpponentScale = 400.0f;
+
 // Regions of the captured image that belong to Rendera's own overlay and must
 // never produce detections. Supplied in normalised screen coordinates.
 struct MaskRegion {
@@ -332,6 +364,7 @@ private:
     std::vector<uint8_t> prevLuma_;
     std::vector<uint8_t> green_;
     std::vector<uint8_t> red_;
+    std::vector<uint8_t> sat_;
     std::vector<uint8_t> diff_;
     std::vector<uint8_t> valid_;
 

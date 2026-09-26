@@ -91,7 +91,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     // The Kotlin side is the single source of truth for tuning, so the whole set
     // is transferred explicitly and atomically. Any layout change must bump
     // CONFIG_FLOATS on the Kotlin side too.
-    constexpr jsize kExpected = 42;
+    constexpr jsize kExpected = 44;
     if (env->GetArrayLength(cfg) < kExpected) return;
 
     jfloat* p = env->GetFloatArrayElements(cfg, nullptr);
@@ -110,36 +110,38 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     c.playerMinComponentArea       = static_cast<int>(p[9]);
     c.playerMaxComponentArea       = static_cast<int>(p[10]);
     c.playerMinGreenScore          = p[11];
-    c.playerMinCompactness         = p[12];
-    c.playerMaxAspect              = p[13];
-    c.playerGateGridUnits          = p[14];
-    c.playerAnchorLocked           = p[15] != 0.0f;
-    c.playerAnchorX                = p[16];
-    c.playerAnchorY                = p[17];
-    c.enemyMinComponentArea        = static_cast<int>(p[18]);
-    c.enemyMaxComponentArea        = static_cast<int>(p[19]);
-    c.enemyMinRedScore             = p[20];
-    c.enemyMinCompactness          = p[21];
-    c.maxEnemies                   = static_cast<int>(p[22]);
-    c.enemyAvoidRadiusNorm         = p[23];
-    c.maxTracks                    = static_cast<int>(p[24]);
-    c.maxObservations              = static_cast<int>(p[25]);
-    c.trackGatePixels              = p[26];
-    c.trackProcessPos              = p[27];
-    c.trackProcessVel              = p[28];
-    c.trackMeasureNoise            = p[29];
-    c.trackMaxMisses               = static_cast<int>(p[30]);
-    c.trackMinHitsForProjectile    = static_cast<int>(p[31]);
-    c.projectileMinSpeedNorm       = p[32];
-    c.projectileMinStraightness    = p[33];
-    c.playerRadiusNorm             = p[34];
-    c.projectileRadiusNorm         = p[35];
-    c.reactionHorizonSec           = p[36];
-    c.lethalTtiSec                 = p[37];
-    c.imminentTtiSec               = p[38];
-    c.escapeCandidateCount         = static_cast<int>(p[39]);
-    c.escapeStepNorm               = p[40];
-    c.characterSpeedNorm           = p[41];
+    c.playerMinSaturation          = p[12];
+    c.playerMinCompactness         = p[13];
+    c.playerMaxAspect              = p[14];
+    c.playerGateGridUnits          = p[15];
+    c.playerAnchorLocked           = p[16] != 0.0f;
+    c.playerAnchorX                = p[17];
+    c.playerAnchorY                = p[18];
+    c.enemyMinComponentArea        = static_cast<int>(p[19]);
+    c.enemyMaxComponentArea        = static_cast<int>(p[20]);
+    c.enemyMinRedScore             = p[21];
+    c.enemyMinSaturation           = p[22];
+    c.enemyMinCompactness          = p[23];
+    c.maxEnemies                   = static_cast<int>(p[24]);
+    c.enemyAvoidRadiusNorm         = p[25];
+    c.maxTracks                    = static_cast<int>(p[26]);
+    c.maxObservations              = static_cast<int>(p[27]);
+    c.trackGatePixels              = p[28];
+    c.trackProcessPos              = p[29];
+    c.trackProcessVel              = p[30];
+    c.trackMeasureNoise            = p[31];
+    c.trackMaxMisses               = static_cast<int>(p[32]);
+    c.trackMinHitsForProjectile    = static_cast<int>(p[33]);
+    c.projectileMinSpeedNorm       = p[34];
+    c.projectileMinStraightness    = p[35];
+    c.playerRadiusNorm             = p[36];
+    c.projectileRadiusNorm         = p[37];
+    c.reactionHorizonSec           = p[38];
+    c.lethalTtiSec                 = p[39];
+    c.imminentTtiSec               = p[40];
+    c.escapeCandidateCount         = static_cast<int>(p[41]);
+    c.escapeStepNorm               = p[42];
+    c.characterSpeedNorm           = p[43];
 
     e->setConfig(c);
     env->ReleaseFloatArrayElements(cfg, p, JNI_ABORT);

@@ -27,20 +27,28 @@ data class VisionTuning(
     val blobMinMeanStrength: Float = 22f,
 
     // --- player detection ---
-    val playerMinComponentArea: Int = 6,
+    //
+    // `*Score` values are opponent signals (G - max(R,B) and R - max(G,B)) scaled
+    // to 0..255, so they are hue correct and scale free. The saturation gate is
+    // the second half of the discrimination: Brawl Stars' selection ring scores
+    // about 240 while grass of the same hue sits near 80, so hue alone cannot
+    // separate them.
+    val playerMinComponentArea: Int = 8,
     val playerMaxComponentArea: Int = 900,
-    val playerMinGreenScore: Float = 70f,
-    val playerMinCompactness: Float = 0.22f,
+    val playerMinGreenScore: Float = 58f,
+    val playerMinSaturation: Float = 105f,
+    val playerMinCompactness: Float = 0.20f,
     val playerMaxAspect: Float = 4.5f,
-    val playerGateGridUnits: Float = 46f,
+    val playerGateGridUnits: Float = 34f,
     val playerAnchorLocked: Boolean = false,
     val playerAnchorX: Float = 0.5f,
     val playerAnchorY: Float = 0.5f,
 
     // --- enemy detection ---
-    val enemyMinComponentArea: Int = 4,
+    val enemyMinComponentArea: Int = 5,
     val enemyMaxComponentArea: Int = 700,
-    val enemyMinRedScore: Float = 64f,
+    val enemyMinRedScore: Float = 55f,
+    val enemyMinSaturation: Float = 105f,
     val enemyMinCompactness: Float = 0.18f,
     val maxEnemies: Int = 10,
     val enemyAvoidRadiusNorm: Float = 0.11f,
@@ -53,7 +61,9 @@ data class VisionTuning(
     val trackProcessVel: Float = 240f,
     val trackMeasureNoise: Float = 260f,
     val trackMaxMisses: Int = 5,
-    val trackMinHitsForProjectile: Int = 3,
+    // 2, not 3. At 60 fps a third observation costs 50 ms, and close range
+    // bullets in Brawl Stars arrive in well under 100 ms.
+    val trackMinHitsForProjectile: Int = 2,
     val projectileMinSpeedNorm: Float = 0.22f,
     val projectileMinStraightness: Float = 0.55f,
 
@@ -87,6 +97,7 @@ data class VisionTuning(
         dst[i++] = playerMinComponentArea.toFloat()
         dst[i++] = playerMaxComponentArea.toFloat()
         dst[i++] = playerMinGreenScore
+        dst[i++] = playerMinSaturation
         dst[i++] = playerMinCompactness
         dst[i++] = playerMaxAspect
         dst[i++] = playerGateGridUnits
@@ -96,6 +107,7 @@ data class VisionTuning(
         dst[i++] = enemyMinComponentArea.toFloat()
         dst[i++] = enemyMaxComponentArea.toFloat()
         dst[i++] = enemyMinRedScore
+        dst[i++] = enemyMinSaturation
         dst[i++] = enemyMinCompactness
         dst[i++] = maxEnemies.toFloat()
         dst[i++] = enemyAvoidRadiusNorm

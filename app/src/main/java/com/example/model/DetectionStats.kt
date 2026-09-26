@@ -28,6 +28,8 @@ data class DetectionStats(
     val isPlayerCalibrated: Boolean = false,
     val autoDodgeArmed: Boolean = false,
     val accessibilityReady: Boolean = false,
+    /** False while the configured game is not the foreground app. */
+    val gameInForeground: Boolean = true,
     val activeGamePackage: String = "",
     val latestTacticalAdvice: String = "Idle."
 )

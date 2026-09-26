@@ -17,8 +17,8 @@ import java.nio.ByteOrder
  *    so and can fall back to the Kotlin pipeline; nothing is ever invented.
  */
 class NativeVisionEngine(
-    val gridWidth: Int = 160,
-    val gridHeight: Int = 90,
+    val gridWidth: Int = 200,
+    val gridHeight: Int = 112,
     screenWidth: Int = 1080,
     screenHeight: Int = 1920
 ) : AutoCloseable {
@@ -32,8 +32,8 @@ class NativeVisionEngine(
         /** Number of ints the native layer writes. Must match `kOutIntCount`. */
         const val OUT_INTS = 8
 
-        /** Must match `CONFIG_FLOATS` on the native side. */
-        const val CONFIG_FLOATS = 42
+        /** Must match `kExpected` in `nativeConfigure`. */
+        const val CONFIG_FLOATS = 44
 
         const val MAX_MASKS = 8
         const val MAX_BLOBS = 48

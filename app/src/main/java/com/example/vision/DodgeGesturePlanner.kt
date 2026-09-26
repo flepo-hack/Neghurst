@@ -64,7 +64,15 @@ object DodgeGesturePlanner {
         val isEmpty: Boolean get() = strokes.isEmpty()
     }
 
-    /** Tunables for the four phases. All times in milliseconds. */
+    /**
+     * Tunables for the four phases. All times in milliseconds.
+     *
+     * [pressMs] and [dragMs] are the two phases that delay the moment the stick
+     * actually starts moving, and they are the entire latency budget for a
+     * close range dodge. At the default 45 + 35 ms the stick does not begin to
+     * move until 80 ms after dispatch, which is most of the window on a
+     * point blank shot, so [urgent] shortens them for the cases that need it.
+     */
     data class Timing(
         val pressMs: Long = 45L,
         val dragMs: Long = 35L,
@@ -79,6 +87,29 @@ object DodgeGesturePlanner {
             require(minHoldMs > 0) { "minHoldMs must be positive" }
             require(maxHoldMs >= minHoldMs) { "maxHoldMs must be >= minHoldMs" }
         }
+
+        /**
+         * Timing for an imminent hit.
+         *
+         * Only [pressMs] and [dragMs] shrink, to just above [MIN_STROKE_MS], so
+         * the stick starts moving after 38 ms instead of 80 ms. They cannot go
+         * lower: below the platform touch slop the motion is delivered as a tap
+         * and the dodge silently does nothing, which is the exact failure this
+         * whole class exists to prevent.
+         *
+         * The hold window is deliberately left untouched. The hold is the only
+         * phase that produces actual travel, and shortening it would buy nothing
+         * that the press/drag change has not already bought: what an urgent dodge
+         * needs is for movement to *start* sooner, and a longer hold only
+         * overruns the impact, at which point the game stops listening anyway.
+         */
+        fun urgent(): Timing = copy(
+            pressMs = 20L.coerceAtLeast(MIN_STROKE_MS),
+            dragMs = 18L.coerceAtLeast(MIN_STROKE_MS)
+        )
+
+        /** Milliseconds before the stick starts to move. */
+        fun onsetMs(): Long = pressMs + dragMs
     }
 
     /**

@@ -1,19 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  `accessibilityEventTypes` is deliberately empty.
+  `accessibilityEventTypes` requests ONLY `typeWindowStateChanged`.
 
-  The previous config requested `typeWindowStateChanged|typeWindowContentChanged`.
+  The previous config asked for `typeWindowStateChanged|typeWindowContentChanged`.
   A running game emits `typeWindowContentChanged` continuously as its HUD
   updates, which floods the service with thousands of events per second. That is
   a well known cause of AccessibilityService ANRs and, more importantly here, of
-  gesture dispatch being delayed by tens of milliseconds. Rendera only ever
-  *dispatches* gestures, it never inspects the UI, so it needs no events at all.
+  gesture dispatch being delayed by tens of milliseconds on exactly the frame
+  where a dodge has to be delivered.
 
-  `canRetrieveWindowContent` is off for the same reason: nothing reads window
-  content, and requesting it adds latency and review friction for no benefit.
+  `typeWindowStateChanged` fires only when a window gains or loses focus, a few
+  times per second at worst, and it is what lets Rendera know whether the game is
+  actually in the foreground before spending a gesture. Running detection over the
+  launcher or a menu would feed the tracker pure noise.
+
+  `canRetrieveWindowContent` is off: nothing reads window content, so requesting
+  it adds latency and review friction for no benefit.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes=""
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:canPerformGestures="true"

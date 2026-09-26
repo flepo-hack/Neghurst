@@ -52,6 +52,7 @@ class TacticalHudView(context: Context) : View(context) {
         val escapeSufficient: Boolean = true,
         val anchorsCalibrated: Boolean = false,
         val accessibilityReady: Boolean = false,
+        val gameForeground: Boolean = true,
         val autoDodgeArmed: Boolean = false,
         val note: String = ""
     )
@@ -156,6 +157,7 @@ class TacticalHudView(context: Context) : View(context) {
                 if (s.escapeSufficient) "" else " PARTIAL"
         }
         lines += "acc " + if (s.accessibilityReady) "READY" else "OFF"
+        lines += "  game " + if (s.gameForeground) "FGD" else "BG"
         if (s.note.isNotEmpty()) lines += s.note
 
         var y = pad + titlePaint.textSize
