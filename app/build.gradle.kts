@@ -11,7 +11,16 @@ plugins {
 
 android {
   namespace = "com.example"
-  compileSdk { version = release(36) { minorApiLevel = 1 } }
+  // Plain 36, deliberately NOT `release(36) { minorApiLevel = 1 }`.
+  //
+  // A minor SDK version requires the matching platform to be installed. The CI
+  // workflow installs `platforms;android-36`, not `android-36.1`, so asking for
+  // minor level 1 gave the Kotlin compiler a partial stub classpath and every
+  // core class outside the stub became unresolvable: android.util.DisplayMetrics,
+  // android.view.Display and android.util.Point all failed to resolve, and
+  // `compileDebugKotlin` died in app/src/main. Nothing in this app uses a 36.1
+  // API, so the minor version bought nothing and cost the whole compile.
+  compileSdk = 36
   ndkVersion = "27.2.12479018"
 
   defaultConfig {

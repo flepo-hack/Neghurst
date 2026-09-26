@@ -76,6 +76,12 @@ jobs:
             fi
           done < <(find app/src/main/cpp -maxdepth 1 -name '*.cpp')
 
+      # Compile the Kotlin main sources on their own, before the NDK build.
+      # The Kotlin compile is the fastest way to find a broken classpath or a
+      # type error, and it costs seconds where the native build costs a minute.
+      # A partial compile classpath - which is what asking for a minor SDK
+      # version that is not installed produces - shows up here as every core
+      # class going unresolved, rather than several minutes later.
       - name: Luo vaadittu Keystore
         run: |
           keytool -genkey -v -keystore my-upload-key.jks \
@@ -115,6 +121,21 @@ jobs:
       - name: Allekirjoitusliput
         run: |
           cat >> "$GITHUB_ENV" <<EOF
+
+      - name: Käännä Kotlin-lähdekoodi
+        run: |
+          set -uo pipefail
+          ./gradlew :app:compileDebugKotlin \
+            -Pandroid.injected.signing.store.file="$ANDROID_INJECTED_SIGNING_STORE_FILE" \
+            -Pandroid.injected.signing.store.password="$ANDROID_INJECTED_SIGNING_STORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$ANDROID_INJECTED_SIGNING_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$ANDROID_INJECTED_SIGNING_KEY_PASSWORD" \
+            --no-daemon 2>&1 | tee /tmp/kotlin.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Raportoi Kotlin-käännösvirheet
+        if: failure()
+        run: python3 .github/scripts/dump_log.py /tmp/kotlin.log
           ANDROID_INJECTED_SIGNING_STORE_FILE=$SIGN_STORE
           ANDROID_INJECTED_SIGNING_STORE_PASSWORD=$SIGN_STORE_PASS
           ANDROID_INJECTED_SIGNING_KEY_ALIAS=$SIGN_KEY_ALIAS
