@@ -192,10 +192,33 @@ jobs:
           done
           echo "native engine built for ${#found[@]} ABI(s)"
 
+      # The previous command was `:app:testReleaseUnitTest`, which does not
+      # exist in AGP 9: the run failed with "Cannot locate tasks that match ...
+      # as task 'testReleaseUnitTest' not found", so the tests had not been
+      # running at all and every earlier "test" pass proved nothing.
+      #
+      # `:app:test` is the aggregate task and always exists. This step also lists
+      # the real per-variant task names, so the next person does not have to
+      # guess a task name either.
+      - name: Luo testitehtävät
+        run: |
+          set -uo pipefail
+          ./gradlew :app:tasks --all 2>&1 | tee /tmp/tasks.log >/dev/null
+          echo "--- unit test tasks available ---"
+          grep -iE "^test.*UnitTest" /tmp/tasks.log | while IFS= read -r line; do
+            echo "::notice::${line}"
+          done
+          count=$(grep -ciE "^test.*UnitTest" /tmp/tasks.log || true)
+          echo "::notice::$count unit test task(s) found"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::no unit test task exists in this build; the tests cannot run"
+            exit 1
+          fi
+
       - name: Aja yksikkötestit
         run: |
           set -uo pipefail
-          ./gradlew :app:testReleaseUnitTest \
+          ./gradlew :app:test \
             -Pandroid.injected.signing.store.file="$ANDROID_INJECTED_SIGNING_STORE_FILE" \
             -Pandroid.injected.signing.store.password="$ANDROID_INJECTED_SIGNING_STORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$ANDROID_INJECTED_SIGNING_KEY_ALIAS" \
