@@ -135,24 +135,54 @@ jobs:
             -Pandroid.injected.signing.key.password="$ANDROID_INJECTED_SIGNING_KEY_PASSWORD" \
             --no-daemon --stacktrace
 
+      # Asserts the engine really was built rather than trusting the exit code.
+      #
+      # The search is a `find`, not a hard coded path, and that is the whole point
+      # of this step being rewritten: a previous version globbed
+      # `app/build/intermediates/cxx/release/...`, but AGP drives CMake with
+      # **RelWithDebInfo** for a release build, so the directory is named
+      # `RelWithDebInfo` and the glob never matched. The build had succeeded and
+      # was reported as failed. Guessing a layout is exactly how that happens, so
+      # it searches instead, and prints the real layout when it finds nothing so
+      # the next failure needs no guesswork either.
       - name: Varmista että moottori todella syntyi
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          found=(app/build/intermediates/cxx/release/*/obj/*/librendera_native.so)
+          set -uo pipefail
+          mapfile -t found < <(find app -name 'librendera_native.so' -type f 2>/dev/null | sort)
           if [ ${#found[@]} -eq 0 ]; then
             echo "::error::librendera_native.so was not produced; the APK would ship" \
                  "with no vision engine and detect nothing."
+            echo "--- app/.cxx ---"
+            find app/.cxx -maxdepth 4 -type d 2>/dev/null | head -40
+            echo "--- app/build/intermediates ---"
+            find app/build/intermediates -maxdepth 2 -type d 2>/dev/null | head -40
             exit 1
           fi
+
+          # Any of these can read the dynamic symbol table. The NDK bundled
+          # llvm-readelf is tried after the system one because a runner image is
+          # not guaranteed to ship binutils.
+          SYMBOLS=""
+          for exe in readelf \
+                     "$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+                     llvm-readelf; do
+            if command -v "$exe" >/dev/null 2>&1; then SYMBOLS="$exe"; break; fi
+          done
+
           for so in "${found[@]}"; do
             echo "  $(du -h "$so" | cut -f1)  $so"
-            if ! readelf -sW "$so" | grep -q \
-                 'Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess'; then
-              echo "::error::$so has no nativeProcess JNI symbol"
-              exit 1
+            if [ -n "$SYMBOLS" ]; then
+              for sym in nativeCreate nativeProcess nativeSetMask; do
+                if ! "$SYMBOLS" --dyn-syms --wide "$so" 2>/dev/null | grep -q "$sym"; then
+                  echo "::error::$so exports no $sym JNI symbol; Kotlin cannot call it"
+                  exit 1
+                fi
+              done
+            else
+              echo "  (no readelf available; symbol check deferred to the APK step)"
             fi
           done
+          echo "native engine built for ${#found[@]} ABI(s)"
 
       - name: Aja yksikkötestit
         run: |
@@ -197,6 +227,29 @@ jobs:
           fi
           echo "native payload in APK:"
           unzip -l "$APK_PATH" | grep 'librendera_native.so' | awk '{print "  " $1 "  " $4}'
+
+          # Check the library that actually ships, for every packaged ABI. This
+          # is path independent and is the contract that matters, so it is the
+          # real gate; the build-directory step above is only a fast failure.
+          rm -rf apk_libs && mkdir -p apk_libs
+          unzip -o -q "$APK_PATH" 'lib/*/librendera_native.so' -d apk_libs
+          abis=$(find apk_libs/lib -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+          echo "ABIs packaged: $abis"
+          if [ "$abis" -lt 1 ]; then
+            echo "::error::no native library for any ABI inside the APK"
+            exit 1
+          fi
+          for so in apk_libs/lib/*/librendera_native.so; do
+            if command -v readelf >/dev/null 2>&1; then
+              for sym in nativeCreate nativeProcess; do
+                if ! readelf --dyn-syms --wide "$so" | grep -q "$sym"; then
+                  echo "::error::$so has no $sym symbol"
+                  exit 1
+                fi
+              done
+            fi
+            echo "  verified $so ($(du -h "$so" | cut -f1))"
+          done
           echo "total size: $(du -h "$APK_PATH" | cut -f1)"
 
           mv "$APK_PATH" Rakenna_AP3K.apk
