@@ -8,8 +8,8 @@ import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.util.Point
 import android.view.Display
+import android.view.Surface
 import android.view.accessibility.AccessibilityEvent
 import com.example.vision.DodgeGesturePlanner
 import java.util.concurrent.atomic.AtomicBoolean
@@ -204,13 +204,17 @@ class RenderaAccessibilityService : AccessibilityService() {
             val display: Display? = dm?.getDisplay(Display.DEFAULT_DISPLAY)
                 ?: dm?.getDisplays()?.firstOrNull()
             if (display != null) {
-                val size = Point()
-                display.getRealSize(size)
-                if (size.x > 0 && size.y > 0) {
-                    displayWidth = size.x
-                    displayHeight = size.y
-                }
+                val metrics = android.util.DisplayMetrics()
                 @Suppress("DEPRECATION")
+                display.getRealMetrics(metrics)
+                val rotated = display.rotation == Surface.ROTATION_90 ||
+                    display.rotation == Surface.ROTATION_270
+                val w = if (rotated) metrics.height else metrics.width
+                val h = if (rotated) metrics.width else metrics.height
+                if (w > 0 && h > 0) {
+                    displayWidth = w
+                    displayHeight = h
+                }
                 displayRotation = display.rotation
             }
         } catch (t: Throwable) {

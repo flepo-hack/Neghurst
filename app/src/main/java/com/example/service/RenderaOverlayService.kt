@@ -126,9 +126,13 @@ class RenderaOverlayService : Service() {
         private const val VISION_IDLE_SLEEP_MS = 4L
         private const val STATS_INTERVAL_MS = 1000L
 
-        private const val COLOR_IDLE = 0xCC2A0845
-        private const val COLOR_ARMED = 0xE60F3822
-        private const val COLOR_MENU = 0xF01A0F2E
+        // ARGB colours whose top bit is set do not fit in a Kotlin Int literal:
+        // 0xCC2A0845 is 3425306693, so `const val x = 0xCC2A0845` is inferred as
+        // Long and every use as a colour fails to compile. These are `val` with an
+        // explicit narrowing, which keeps the readable hex and the Int type.
+        private val COLOR_IDLE: Int = 0xCC2A0845.toInt()
+        private val COLOR_ARMED: Int = 0xE60F3822.toInt()
+        private val COLOR_MENU: Int = 0xF01A0F2E.toInt()
 
         @Volatile
         var isRunning = false
@@ -525,16 +529,14 @@ class RenderaOverlayService : Service() {
     private fun resolveDisplayGeometry() {
         try {
             val dm = getSystemService(DisplayManager::class.java)
-            val display = dm?.getDisplay(DisplayManager.DEFAULT_DISPLAY)
+            val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
                 ?: dm?.getDisplays()?.firstOrNull()
             if (display != null) {
-                val p = android.util.Point()
-                display.getRealSize(p)
-                if (p.x > 0 && p.y > 0) {
-                    displayWidth = p.x
-                    displayHeight = p.y
+                val size = realDisplaySize(display)
+                if (size.first > 0 && size.second > 0) {
+                    displayWidth = size.first
+                    displayHeight = size.second
                 }
-                @Suppress("DEPRECATION")
                 displayRotation = display.rotation
             }
         } catch (t: Throwable) {
@@ -547,6 +549,24 @@ class RenderaOverlayService : Service() {
             displayWidth = dm.widthPixels
             displayHeight = dm.heightPixels
         }
+    }
+
+    /**
+     * Real display size, with rotation already applied.
+     *
+     * `Display.getRealSize` reports width and height in the panel's own
+     * orientation, so a rotated device comes back transposed. `getRealMetrics`
+     * plus an explicit swap gives the same numbers as a logical point, without
+     * depending on `android.util.Point`.
+     */
+    private fun realDisplaySize(display: android.view.Display): Pair<Int, Int> {
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        display.getRealMetrics(metrics)
+        val rotated = display.rotation == android.view.Surface.ROTATION_90 ||
+            display.rotation == android.view.Surface.ROTATION_270
+        return if (rotated) metrics.height to metrics.width
+        else metrics.width to metrics.height
     }
 
     /**
@@ -908,7 +928,7 @@ class RenderaOverlayService : Service() {
             lastDodgeAngleDeg = lastDodgeAngleDeg,
             lastDodgeTimestamp = lastDodgeAtMs,
             currentThreatLevel = latestSeverity,
-            visionMillis = lastVisionMillis,
+            visionMillis = latestVisionMillis,
             nativeVisionAvailable = detector?.isNativeAvailable == true,
             isJoystickCalibrated = anchors.calibrated,
             isPlayerCalibrated = anchors.calibrated,
@@ -1068,8 +1088,8 @@ class RenderaOverlayService : Service() {
                 MotionEvent.ACTION_DOWN -> {
                     downRawX = event.rawX
                     downRawY = event.rawY
-                    downX = params.x
-                    downY = params.y
+                    downX = params.x.toFloat()
+                    downY = params.y.toFloat()
                     dragging = false
                     longFired = false
                     mainHandler.postDelayed(longPressRunnable, longPressMs)
