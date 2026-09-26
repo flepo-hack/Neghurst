@@ -177,6 +177,42 @@ def main() -> int:
                 f"lowest {lowest}); the file is truncated or has a stray brace"
             )
 
+    # 7. Cross-references to VisionTuning's own members, used by the
+    #    wire-format test. A companion member referenced from the wrong class
+    #    resolves nowhere, and the only report is a wall of "Unresolved
+    #    reference" from the test compile. Deliberately narrow: a general
+    #    cross-class reference checker produces false positives on `Companion`,
+    #    `::class`, enum `entries`, and extensions, and a check that blocks the
+    #    build on its own noise is worse than no check.
+    tuning_path = pathlib.Path(
+        "app/src/main/java/com/example/vision/nativebridge/VisionTypes.kt"
+    )
+    if tuning_path.exists():
+        src = tuning_path.read_text()
+        m = re.search(r"data class VisionTuning\((.*?)\n\) \{", src, re.S)
+        if not m:
+            findings.append("VisionTuning is not found in VisionTypes.kt")
+        else:
+            start = m.end()
+            nxt = re.search(r"\n(?:data class|class|enum class|object)\s+\w+", src[start:])
+            body = src[start : start + nxt.start()] if nxt else src[start:]
+            declared_tuning = set(
+                re.findall(
+                    r"\b(?:val|var|fun|const)\s+(?:<[^>]*>\s*)?(\w+)", body
+                )
+            )
+            for path in files:
+                for um in re.finditer(
+                    r"\bVisionTuning\.(\w+)", re.sub(r"/\*.*?\*/", "", path.read_text(), flags=re.S)
+                ):
+                    member = um.group(1)
+                    if member not in declared_tuning:
+                        findings.append(
+                            f"{path}: `VisionTuning.{member}` is not declared in "
+                            f"VisionTuning. A companion member is only reachable "
+                            f"through the class that declares it."
+                        )
+
     if findings:
         for f in findings:
             print(f"::error::{f}")
