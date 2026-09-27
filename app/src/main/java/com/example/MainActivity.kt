@@ -52,6 +52,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -112,6 +113,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Bumped on every resume so the permission rows re-read themselves. */
+    private var resumeTickState = mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -125,6 +129,44 @@ class MainActivity : ComponentActivity() {
                 MainContent()
             }
         }
+        handleCaptureRequest(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // The bubble asks for a fresh grant after a capture ends. On Android 14+
+        // the token is single use, so a new consent dialog is unavoidable; this
+        // is the only place that can be shown.
+        handleCaptureRequest(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumeTickState.intValue++
+    }
+
+    /**
+     * Offers a fresh screen-capture grant when the overlay asked for one.
+     *
+     * The bubble cannot re-acquire a MediaProjection itself: on Android 14+ the
+     * token is single use, and the consent dialog needs an Activity. It sends
+     * this extra instead of trying and failing silently.
+     */
+    private fun handleCaptureRequest(intent: Intent?) {
+        if (intent?.getBooleanExtra(RenderaOverlayService.EXTRA_NEEDS_CAPTURE, false) != true) {
+            return
+        }
+        intent.removeExtra(RenderaOverlayService.EXTRA_NEEDS_CAPTURE)
+        // The old token is spent whether or not it was used.
+        screenCaptureResultCode = 0
+        screenCaptureData = null
+        Toast.makeText(
+            this,
+            "Screen capture had ended. Grant it again to resume.",
+            Toast.LENGTH_LONG
+        ).show()
+        requestMediaProjection()
     }
 
     private fun checkOverlayPermission(): Boolean {
@@ -180,9 +222,31 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MainContent() {
+        // `remember` without a key is evaluated once and then frozen, so
+        // returning from the Settings screen to enable the accessibility service
+        // left the row reading "not granted" forever. The resume tick makes the
+        // permissions re-read every time the Activity comes forward.
+        val resumeTick = resumeTickState.intValue
         var hasOverlay by remember { mutableStateOf(checkOverlayPermission()) }
         var hasAccessibility by remember { mutableStateOf(checkAccessibilityPermission()) }
         var hasMediaProjection by remember { mutableStateOf(screenCaptureResultCode != 0) }
+
+        // The service publishes observable state; a bare `var` read during
+        // composition never triggers a recomposition, so the status pill used to
+        // show whatever was true the first time the screen was drawn.
+        val serviceStatus by RenderaOverlayService.status.collectAsState()
+
+        // Re-read the permission rows whenever the Activity resumes.
+        LaunchedEffect(resumeTick) {
+            hasOverlay = checkOverlayPermission()
+            hasAccessibility = checkAccessibilityPermission()
+            hasMediaProjection = screenCaptureResultCode != 0
+        }
+
+        // True only when frames are actually arriving AND the engine can use
+        // them. "Service alive" is not the same thing and conflating them is how
+        // the app looked healthy while detecting nothing.
+        val isRunning = serviceStatus.running && serviceStatus.capturing
 
         // Read the flows off the shared singleton so the slider, the in-game
         // menu and the vision engine can never disagree. The previous code gave
@@ -307,8 +371,9 @@ class MainActivity : ComponentActivity() {
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // Status pill
-                        val isRunning = RenderaOverlayService.isRunning
+                        // Status pill. `isRunning` is the observed value from
+                        // above, NOT a second read of the service's bare var,
+                        // which is what froze this pill in the first place.
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(20.dp))
@@ -323,10 +388,26 @@ class MainActivity : ComponentActivity() {
                                 .padding(horizontal = 14.dp, vertical = 6.dp)
                         ) {
                             Text(
-                                text = if (isRunning) "● OVERLAY ACTIVE ON SCREEN" else "○ RENDERA IDLE",
+                                text = when {
+                                        !serviceStatus.running -> "○ RENDERA IDLE"
+                                        !serviceStatus.nativeAvailable ->
+                                            "● ENGINE MISSING FROM THIS BUILD"
+                                        !serviceStatus.capturing -> "● CAPTURE ENDED - TAP TO RE-GRANT"
+                                        !serviceStatus.anchorsCalibrated ->
+                                            "● CAPTURING - SET THE ANCHORS"
+                                        !serviceStatus.accessibilityReady ->
+                                            "● ENABLE THE ACCESSIBILITY SERVICE"
+                                        serviceStatus.suppressedByBackground ->
+                                            "● ${serviceStatus.targetPackage} NOT IN FRONT"
+                                        else -> "● ARMED - DETECTING"
+                                    },
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (isRunning) SafeGreen else Color(0xFFE0AAFF)
+                                color = when {
+                                        isRunning -> SafeGreen
+                                        serviceStatus.running -> Color(0xFFFFB44D)
+                                        else -> Color(0xFFE0AAFF)
+                                    }
                             )
                         }
 

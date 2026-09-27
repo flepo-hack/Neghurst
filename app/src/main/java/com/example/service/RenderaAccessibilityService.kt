@@ -71,6 +71,22 @@ class RenderaAccessibilityService : AccessibilityService() {
         private val _foregroundPackage = MutableStateFlow("")
         val foregroundPackage: StateFlow<String> = _foregroundPackage.asStateFlow()
 
+        /**
+         * True when [pkg] is our own package, a system surface, or simply not
+         * known. The caller treats all three as "no evidence that the game left",
+         * because the accessibility service only reports the foreground app as
+         * accurately as the platform's window events allow, and guessing wrong in
+         * that direction silently disables everything.
+         */
+        fun isForegroundAppUs(pkg: String): Boolean =
+            pkg.isEmpty() ||
+                pkg == "com.example" ||
+                pkg == "com.aistudio.rendera.dodge" ||
+                pkg == "com.android.systemui" ||
+                pkg == "android" ||
+                pkg.startsWith("com.google.android.inputmethod") ||
+                pkg.startsWith("com.android.inputmethod")
+
         /** True once the service is bound and can accept gestures. */
         fun isAvailable(): Boolean = instance != null
 

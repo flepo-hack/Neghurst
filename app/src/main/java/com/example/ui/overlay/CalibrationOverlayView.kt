@@ -75,6 +75,9 @@ class CalibrationOverlayView(
     private var stickRadius = 0f
 
     private var dragging = false
+    private var dragMoved = false
+    private var downX = 0f
+    private var downY = 0f
     private var lastTouchX = 0f
     private var lastTouchY = 0f
     private val touchSlop = dp(6f)
@@ -89,7 +92,16 @@ class CalibrationOverlayView(
     private val statusRect = RectF()
 
     // --- paints ---
-    private val scrimPaint = Paint().apply { color = Color.argb(150, 4, 2, 10) }
+    /**
+     * Almost transparent, and it has to be.
+     *
+     * MediaProjection captures whatever is composited on screen, including this
+     * window. A dimmed full-screen scrim therefore replaced the game with a flat
+     * rectangle for the vision engine, so the player could never be detected
+     * while the calibration overlay was open and AUTO DETECT was guaranteed to
+     * fail. Just enough tint to make the reticles readable.
+     */
+    private val scrimPaint = Paint().apply { color = Color.argb(38, 4, 2, 10) }
     private val joyRingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = dp(3f)
@@ -109,7 +121,7 @@ class CalibrationOverlayView(
         color = Color.argb(60, 5, 255, 161)
     }
     private val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(240, 14, 18, 32)
+        color = Color.argb(225, 14, 18, 32)
     }
     private val buttonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val buttonStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -325,20 +337,30 @@ class CalibrationOverlayView(
                         return true
                     }
                 }
-                // Anything else starts a reticle drag.
+                // Anything else MAY become a reticle drag, but does not become
+                // one until the finger has actually moved. A single tap used to
+                // snap the anchor to wherever it landed, which is how the
+                // calibration ended up somewhere nobody intended and looked
+                // broken. Now a tap that is not on a button does nothing.
                 dragging = true
+                dragMoved = false
+                downX = x
+                downY = y
                 lastTouchX = x
                 lastTouchY = y
-                moveActiveAnchor(x, y, force = true)
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
                 if (!dragging) return true
-                if (hypot(x - lastTouchX, y - lastTouchY) < touchSlop) return true
+                val totalFromStart = hypot(x - downX, y - downY)
+                if (!dragMoved && totalFromStart < touchSlop) return true
+                // A deliberate drag commits the anchor to the finger, so the
+                // reticle lands exactly where the user put it.
+                dragMoved = true
                 lastTouchX = x
                 lastTouchY = y
-                moveActiveAnchor(x, y, force = false)
+                moveActiveAnchor(x, y, force = true)
                 return true
             }
 
@@ -347,6 +369,9 @@ class CalibrationOverlayView(
                 // here would let a parent steal the stream and leave the reticle
                 // half moved.
                 dragging = false
+                dragMoved = false
+                downX = 0f
+                downY = 0f
                 return true
             }
         }

@@ -53,6 +53,9 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -96,6 +99,28 @@ import kotlinx.coroutines.launch
  * The dodge gesture itself was fixed in [RenderaAccessibilityService] and
  * [com.example.vision.DodgeGesturePlanner].
  */
+/**
+ * Everything the UI needs to describe what the engine is actually doing, published
+ * as observable state rather than polled from a bare `var`.
+ *
+ * `capturing` is deliberately separate from `running`: the service can be alive
+ * with the capture torn down, and showing "active" for that state is how the app
+ * ends up looking healthy while detecting nothing.
+ */
+data class ServiceStatus(
+    val running: Boolean = false,
+    val capturing: Boolean = false,
+    val armed: Boolean = false,
+    val anchorsCalibrated: Boolean = false,
+    val nativeAvailable: Boolean = false,
+    val accessibilityReady: Boolean = false,
+    val foregroundPackage: String = "",
+    val targetPackage: String = "",
+    val suppressedByBackground: Boolean = false,
+    val fps: Int = 0,
+    val visionMillis: Double = 0.0
+)
+
 class RenderaOverlayService : Service() {
 
     companion object {
@@ -107,6 +132,9 @@ class RenderaOverlayService : Service() {
         const val EXTRA_DATA_INTENT = "dataIntent"
         const val EXTRA_GAME_NAME = "gameName"
         const val EXTRA_PACKAGE_NAME = "packageName"
+
+        /** Set when the bubble asks the Activity for a fresh capture grant. */
+        const val EXTRA_NEEDS_CAPTURE = "needsCapture"
 
         private const val TAG = "RenderaOverlay"
         private const val NOTIFICATION_ID = 4711
@@ -127,6 +155,15 @@ class RenderaOverlayService : Service() {
         private const val VISION_IDLE_SLEEP_MS = 4L
         private const val STATS_INTERVAL_MS = 1000L
 
+        /**
+         * How long the foreground app must disagree with the target before
+         * dodging is suppressed. Long enough that no focus flap reaches it.
+         */
+        private const val BACKGROUND_CONFIRM_MS = 2500L
+
+        /** The HUD is a readout, not an animation: ten updates a second is ample. */
+        private const val HUD_MIN_INTERVAL_MS = 100L
+
         // ARGB colours whose top bit is set do not fit in a Kotlin Int literal:
         // 0xCC2A0845 is 3425306693, so `const val x = 0xCC2A0845` is inferred as
         // Long and every use as a colour fails to compile. These are `val` with an
@@ -135,9 +172,11 @@ class RenderaOverlayService : Service() {
         private val COLOR_ARMED: Int = 0xE60F3822.toInt()
         private val COLOR_MENU: Int = 0xF01A0F2E.toInt()
 
-        @Volatile
-        var isRunning = false
-            private set
+        private val _status = MutableStateFlow(ServiceStatus())
+        val status: StateFlow<ServiceStatus> = _status.asStateFlow()
+
+        /** True while the service is alive. Observed state, not a bare var. */
+        val isRunning: Boolean get() = _status.value.running
     }
 
     // -----------------------------------------------------------------------
@@ -204,6 +243,13 @@ class RenderaOverlayService : Service() {
     )
 
     @Volatile private var autoDodgeArmed = false
+
+    /** When the foreground app was first seen to be something other than the game. */
+    @Volatile private var notInGameSinceMs = 0L
+
+    /** Last HUD content key and when it was pushed, for the change/interval gate. */
+    @Volatile private var lastHudKey: String = ""
+    @Volatile private var lastHudAtMs = 0L
     @Volatile private var anchors: Anchors = Anchors.defaultFor(0, 0)
 
     // -----------------------------------------------------------------------
@@ -216,8 +262,8 @@ class RenderaOverlayService : Service() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         prefs = RenderaPreferences.get(this)
-        isRunning = true
         statsWindowStartMs = SystemClock.elapsedRealtime()
+        publishStatus(running = true, capturing = false, armed = false, anchorsOk = false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -243,10 +289,21 @@ class RenderaOverlayService : Service() {
                 // startForeground MUST precede getMediaProjection() on API 29+.
                 startInForeground()
                 if (setupCapture(resultCode, data)) {
+                    captureEnded = false
+                    publishStatus(capturing = true)
                     ensureDetector()
-                    if (bubbleView == null) showFloatingBubble()
+                    showFloatingBubble()
                     startVisionLoop()
-                    mainHandler.post { prefs.setAutoDodge(true); autoDodgeArmed = true; refreshBubbleUi() }
+                    mainHandler.post {
+                        prefs.setAutoDodge(true)
+                        autoDodgeArmed = true
+                        refreshBubbleUi()
+                        // Say what is actually true rather than a bare "armed":
+                        // with no calibration there is nothing to dodge with yet.
+                        if (!anchors.calibrated) {
+                            toast("Capturing. Long press the bubble to set the anchors.")
+                        }
+                    }
                 }
             }
         }
@@ -260,7 +317,6 @@ class RenderaOverlayService : Service() {
     override fun onDestroy() {
         stopEverything()
         serviceScope.cancel()
-        isRunning = false
         super.onDestroy()
     }
 
@@ -294,6 +350,37 @@ class RenderaOverlayService : Service() {
         }
         autoDodgeArmed = false
         dodgeState.reset()
+        publishStatus(running = false, capturing = false, armed = false, anchorsOk = false)
+    }
+
+    /**
+     * The single source of truth for what the app is doing, pushed to Compose as
+     * observable state.
+     *
+     * The status pill used to read a plain `var` during composition, so Compose
+     * never recomposed on it: it showed whatever was true the first time the
+     * screen was drawn and stayed there. That is the "Rendera stopped, nothing
+     * happens" report - the UI was not wrong, it was frozen.
+     */
+    private fun publishStatus(
+        running: Boolean = _status.value.running,
+        capturing: Boolean = _status.value.capturing,
+        armed: Boolean = autoDodgeArmed,
+        anchorsOk: Boolean = anchors.calibrated
+    ) {
+        _status.value = ServiceStatus(
+            running = running,
+            capturing = capturing,
+            armed = armed && capturing,
+            anchorsCalibrated = anchorsOk,
+            nativeAvailable = detector?.isNativeAvailable == true,
+            accessibilityReady = RenderaAccessibilityService.isAvailable(),
+            foregroundPackage = RenderaAccessibilityService.foregroundPackage.value,
+            targetPackage = prefs.targetPackage.value,
+            suppressedByBackground = shouldSuppressDodge(),
+            fps = latestFps,
+            visionMillis = latestVisionMillis
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -507,12 +594,98 @@ class RenderaOverlayService : Service() {
         }
     }
 
+    /**
+     * The MediaProjection ended.
+     *
+     * It used to tear the whole service down, which is a dead end: the bubble
+     * disappears, nothing explains why, and the only way back is to relaunch the
+     * app and re-grant the projection. A projection can end for reasons that are
+     * not the user's choice - another app starting a cast, a system dialog, an OEM
+     * policy - so the service now stays alive, stops capturing, says so plainly,
+     * and lets the user re-arm from the bubble.
+     *
+     * Re-acquiring the projection itself needs a fresh consent dialog, which only
+     * an Activity can show, so the instruction points there.
+     */
     private fun onProjectionStopped() {
         mainHandler.post {
-            toast("Screen capture ended")
-            stopEverything()
-            stopSelf()
+            captureEnded = true
+            publishStatus(capturing = false, armed = false)
+            visionJob?.cancel()
+            visionJob = null
+            releaseCapture()
+            autoDodgeArmed = false
+            prefs.setAutoDodge(false)
+            dodgeState.reset()
+            latestAnalysis = null
+            latestHudKey = ""
+            removeHud()
+            closeMenu()
+            removeCalibrationOverlay()
+            // A restartable capture state, so the bubble is a real control again
+            // rather than a decoration.
+            showRestartNotice()
         }
+    }
+
+    /**
+     * Replaces the bubble with a clearly actionable "capture ended" bubble.
+     *
+     * A long press cannot fix this, because a fresh consent grant needs an
+     * Activity. Tapping opens the app, where the permission row does the work.
+     */
+    private fun showRestartNotice() {
+        removeBubble()
+        val sizePx = dp(72f).roundToInt()
+        val params = WindowManager.LayoutParams(
+            sizePx, sizePx,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(12f).roundToInt()
+            y = dp(140f).roundToInt()
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = roundedBackground(COLOR_IDLE)
+            elevation = dp(10f)
+        }
+        val label = TextView(this).apply {
+            text = getString(R.string.bubble_capture_ended)
+            setTextColor(0xFF0B0710.toInt())
+            textSize = 9f
+            gravity = Gravity.CENTER
+        }
+        root.addView(
+            label,
+            LinearLayout.LayoutParams(sizePx - dp(10f).roundToInt(), LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
+        root.setOnClickListener { requestCaptureGrant() }
+        runCatching { windowManager.addView(root, params) }
+            .onSuccess { bubbleView = root; bubbleParams = params }
+            .onFailure { Log.e(TAG, "could not show the restart notice", it) }
+    }
+
+    /** Whether the capture was torn down and has not been re-armed. */
+    @Volatile private var captureEnded = false
+
+    /**
+     * Sends the user to the Activity, which is the only place a fresh
+     * MediaProjection consent dialog can be shown. On Android 14+ the token is
+     * single use, so this is not optional after any capture end.
+     */
+    private fun requestCaptureGrant() {
+        val open = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra(EXTRA_NEEDS_CAPTURE, true)
+        }
+        runCatching { startActivity(open) }
+            .onFailure { toast("Open Rendera to grant screen capture again") }
     }
 
     private fun densityDpi(): Int {
@@ -796,20 +969,22 @@ class RenderaOverlayService : Service() {
                             lastAnchors = liveAnchors
                         }
 
-                        val analysis = if (!isTargetInForeground()) {
-                            // Outside the game, drop the history instead of
-                            // feeding the tracker whatever is on screen. A scene
-                            // change would otherwise be read as one enormous
-                            // motion event and dump every track. No `continue`
-                            // here: it would skip the statistics window below
-                            // and leave it stale for however long the app stays
-                            // backgrounded.
-                            synchronized(detectorLock) { d.reset() }
-                            // A stale analysis would let auto-detect calibrate
-                            // from a scene that no longer exists.
-                            latestAnalysis = null
-                            null
-                        } else synchronized(detectorLock) { d.process(
+                        // Analyse unconditionally. The previous version gated
+                        // this on the accessibility service's idea of the
+                        // foreground app and called `d.reset()` on every frame
+                        // when it disagreed. That gate can be wrong forever -
+                        // the last TYPE_WINDOW_STATE_CHANGED the service sees
+                        // may be our own MainActivity, and no event arrives for
+                        // the game on some OEM builds - so detection went
+                        // permanently dead with no error and no frame counter,
+                        // which is exactly "it does not start and never works".
+                        // Auto-detect also depends on this analysis, so it was
+                        // dead for the same reason.
+                        //
+                        // A backgrounded app is now handled where it actually
+                        // costs something: dodging, not analysing. See
+                        // [shouldSuppressDodge].
+                        val analysis = synchronized(detectorLock) { d.process(
                             yPlane = frame.y,
                             yStride = frame.yStride,
                             uPlane = frame.u,
@@ -824,6 +999,7 @@ class RenderaOverlayService : Service() {
                             screenHeight = displayHeight,
                             collectDebug = prefs.debugOverlayEnabled.value
                         ) }
+                        latestAnalysis = analysis
                         if (analysis != null) onAnalysis(analysis, d)
                     }
                 } catch (t: Throwable) {
@@ -839,24 +1015,59 @@ class RenderaOverlayService : Service() {
                     statsFrames = 0
                     statsWindowStartMs = SystemClock.elapsedRealtime()
                     publishStats()
+                    publishStatus()
                 }
             }
         }
     }
 
     /**
-     * True when the configured game is the app in the foreground.
+     * Whether dodging should be suppressed because the game is not in front.
      *
-     * Falls back to "true" when the service is not connected or no target is
-     * configured, so a missing accessibility service does not silently stop
-     * detection; the HUD reports the real state separately.
+     * Deliberately used to gate the DISPATCH, never the analysis. Detecting is
+     * cheap and a wrong "paused" is invisible - no frames, no detections, no
+     * clue why - whereas a wrong "go ahead" at worst fires one gesture in a
+     * launcher. So this fails open on every ambiguity and only suppresses after
+     * a sustained, unambiguous disagreement.
      */
-    private fun isTargetInForeground(): Boolean {
-        if (!RenderaAccessibilityService.isAvailable()) return true
-        return RenderaAccessibilityService.isTargetInForeground(prefs.targetPackage.value)
+    private fun shouldSuppressDodge(): Boolean {
+        if (!autoDodgeArmed) return false
+        if (!RenderaAccessibilityService.isAvailable()) return false
+
+        val target = prefs.targetPackage.value
+        // No target chosen: the user never said what to watch, so never gate.
+        if (target.isEmpty()) return false
+
+        val now = SystemClock.elapsedRealtime()
+        val foreground = RenderaAccessibilityService.foregroundPackage.value
+
+        if (RenderaAccessibilityService.isForegroundAppUs(foreground) || foreground.isEmpty()) {
+            // We are in front, or the service genuinely does not know. Either way
+            // this is not evidence that the game left.
+            notInGameSinceMs = 0L
+            return false
+        }
+
+        if (foreground == target) {
+            notInGameSinceMs = 0L
+            return false
+        }
+
+        if (notInGameSinceMs == 0L) {
+            notInGameSinceMs = now
+            return false
+        }
+        // Require a sustained disagreement. Focus flaps constantly: a volume
+        // panel, a notification, a permission dialog. One frame of evidence
+        // must never disable the thing the user just armed.
+        return now - notInGameSinceMs > BACKGROUND_CONFIRM_MS
     }
 
-    private fun onAnalysis(analysis: ScreenThreatDetector.Analysis?, d: ScreenThreatDetector) {
+    /** True when `pkg` is us, a system surface, or unknown. */
+    private fun isSelfPackage(pkg: String): Boolean =
+        pkg.isEmpty() || pkg == packageName || pkg.startsWith("com.android.systemui")
+
+    private fun onAnalysis(    private fun onAnalysis(analysis: ScreenThreatDetector.Analysis?, d: ScreenThreatDetector) {
         if (analysis == null) return
         latestAnalysis = analysis
 
@@ -867,7 +1078,9 @@ class RenderaOverlayService : Service() {
         } else {
             latestSeverity = ThreatLevel.SAFE
         }
-        if (autoDodgeArmed && analysis.hasDodgeableThreat && displayWidth > 0) {
+        if (autoDodgeArmed && analysis.hasDodgeableThreat && displayWidth > 0 &&
+            !shouldSuppressDodge()
+        ) {
             maybeDodge(analysis, d)
         }
         publishHud(analysis, d)
@@ -938,7 +1151,7 @@ class RenderaOverlayService : Service() {
             anchorsCalibratedFor = "${anchors.calibratedForWidth}x${anchors.calibratedForHeight}",
             autoDodgeArmed = autoDodgeArmed,
             accessibilityReady = RenderaAccessibilityService.isAvailable(),
-            gameInForeground = isTargetInForeground(),
+            gameInForeground = !shouldSuppressDodge(),
             activeGamePackage = prefs.targetPackage.value,
             latestTacticalAdvice = buildAdvice()
         )
@@ -949,7 +1162,8 @@ class RenderaOverlayService : Service() {
         detector?.isNativeAvailable != true -> "Native vision engine missing from this build."
         !anchors.calibrated -> "Long press the bubble and lock the anchors."
         !RenderaAccessibilityService.isAvailable() -> "Enable the Rendera accessibility service."
-        !isTargetInForeground() -> "Waiting for ${prefs.targetPackage.value} to come forward."
+        shouldSuppressDodge() ->
+            "${prefs.targetPackage.value} is not in front. Open the game to resume."
         autoDodgeArmed -> "Armed. ${latestFps} fps, ${frameRing.droppedCount} frames dropped."
         else -> "Paused. Tap the bubble to arm."
     }
@@ -993,6 +1207,7 @@ class RenderaOverlayService : Service() {
             hasEscape = hasThreat
         )
 
+        val now = SystemClock.elapsedRealtime()
         val snapshot = TacticalHudView.Snapshot(
             entities = entities,
             fps = latestFps,
@@ -1014,13 +1229,22 @@ class RenderaOverlayService : Service() {
             escapeSufficient = esc.escapeIsSufficient,
             anchorsCalibrated = currentAnchors.calibrated,
             accessibilityReady = RenderaAccessibilityService.isAvailable(),
-            gameForeground = isTargetInForeground(),
+            gameForeground = !shouldSuppressDodge(),
             autoDodgeArmed = autoDodgeArmed,
             dodgePlan = dodgeState.describe(),
             note = buildAdvice()
         )
 
-        mainHandler.post { hudView?.update(snapshot) }
+        // Throttled, and skipped when nothing visible changed. Posting an
+        // invalidate per analysed frame is up to sixty a second, each one
+        // re-laying out and re-drawing the panel - on its own enough to make
+        // the overlay feel like it is fighting the game for frames.
+        val key = snapshot.lines()
+        if (key != lastHudKey || now - lastHudAtMs >= HUD_MIN_INTERVAL_MS) {
+            lastHudKey = key
+            lastHudAtMs = now
+            mainHandler.post { hudView?.update(snapshot) }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1197,6 +1421,7 @@ class RenderaOverlayService : Service() {
         lastDodgeAtMs = 0L
         triggerHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         mainHandler.post {
+            publishStatus()
             refreshBubbleUi()
             toast(if (autoDodgeArmed) "Auto-dodge ARMED" else "Auto-dodge PAUSED")
         }
@@ -1234,10 +1459,31 @@ class RenderaOverlayService : Service() {
             root.addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, rowH))
         }
 
-        addButton(getString(if (autoDodgeArmed) R.string.menu_pause else R.string.menu_arm)) { toggleAutoDodge() }
+        // One button, three jobs: arm, pause, or send the user to the Activity
+        // when the capture has ended. A dead-end "capture ended" bubble with a
+        // normal-looking arm button is how the app ended up looking functional
+        // and doing nothing.
+        addButton(
+            getString(
+                when {
+                    captureEnded -> R.string.menu_recapture
+                    autoDodgeArmed -> R.string.menu_pause
+                    else -> R.string.menu_arm
+                }
+            )
+        ) {
+            if (captureEnded) requestCaptureGrant() else toggleAutoDodge()
+        }
         addButton(getString(R.string.menu_calibrate)) {
             closeMenu()
             showCalibrationOverlay()
+        }
+        addButton(getString(R.string.menu_auto_detect)) {
+            closeMenu()
+            // Runs against the real game, with no overlay on top of it. The
+            // overlay used to be the only entry point, which meant the engine
+            // was looking at the overlay's own background.
+            runAutoDetect()
         }
         addButton(getString(R.string.menu_hud)) {
             prefs.setDebugOverlayEnabled(!prefs.debugOverlayEnabled.value)
@@ -1409,6 +1655,7 @@ class RenderaOverlayService : Service() {
                     dodgeState.reset()
                     pushMaskRegions()
                     removeCalibrationOverlay()
+                    publishStatus(armed = true, anchorsOk = true)
                     triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)
                     toast("Anchors locked for ${displayWidth}x$displayHeight")
                 }
@@ -1459,28 +1706,60 @@ class RenderaOverlayService : Service() {
      * is the "auto calib does nothing" symptom. Here a failure is reported and
      * the previously committed anchors are left untouched.
      */
+    /**
+     * Seeds the player anchor from the live analysis.
+     *
+     * Reachable from the mini menu as well as the overlay, because the overlay
+     * used to hide the game from the very engine it was asking.
+     *
+     * Accepts a held lock as well as a fresh detection: the green signature is
+     * demanding, and it drops out for a frame whenever the brawler passes under
+     * a bush, a fountain or an ability effect. The engine holds the lock across
+     * exactly that, so refusing to use it made auto-detect fail for reasons that
+     * have nothing to do with the player not being there.
+     */
     private fun runAutoDetect() {
         val d = detector
-        if (d == null || !d.isNativeAvailable) {
+        if (d == null) {
+            mainHandler.post { toast("Vision engine is not running yet") }
+            return
+        }
+        if (!d.isNativeAvailable) {
             mainHandler.post { toast("Vision engine unavailable; auto-detect skipped") }
             return
         }
-        val live = latestAnalysis ?: run {
+        if (displayWidth <= 0 || displayHeight <= 0) {
+            mainHandler.post { toast("Screen size unknown; rotate the device once") }
+            return
+        }
+
+        val live = latestAnalysis
+        if (live == null) {
             mainHandler.post {
-                toast("No analysed frame yet. Play for a second, then retry.")
+                toast("No frame analysed yet. Wait a second, then retry.")
             }
             return
         }
-        if (!live.playerDetected) {
+        if (!live.playerDetected && !live.playerFromAnchor) {
             mainHandler.post {
-                toast("Player not found. Put the brawler in the open and retry.")
+                val raw = live.raw
+                toast(
+                    "No player lock. green=${raw.playerGreenness.toInt()} " +
+                        "locked=${raw.playerLocked} seen=${raw.projectileCount} blobs=" +
+                        "${live.blobCount} - put the brawler on open ground"
+                )
             }
             return
         }
+        if (!live.playerDetected && !anchors.calibrated) {
+            mainHandler.post {
+                toast("Player not locked and no anchor committed; use LOCK & ACTIVATE")
+            }
+            return
+        }
+
         mainHandler.post {
             val updated = anchors.copy(
-                joystickX = anchors.joystickX,
-                joystickY = anchors.joystickY,
                 playerX = (live.playerX / displayWidth).coerceIn(0.05f, 0.95f),
                 playerY = (live.playerY / displayHeight).coerceIn(0.05f, 0.95f),
                 calibrated = true,
@@ -1488,8 +1767,16 @@ class RenderaOverlayService : Service() {
                 calibratedForHeight = displayHeight
             )
             anchors = updated
+            prefs.setAnchors(updated)
+            synchronized(detectorLock) { d.setAnchors(updated) }
+            dodgeState.reset()
             calibrationView?.applyAnchors(updated)
-            toast("Player anchor auto-detected")
+            calibrationView?.setStatus(
+                "Player anchor detected at ${"%.2f".format(updated.playerX)}, " +
+                    "${"%.2f".format(updated.playerY)}. Drag to adjust, then LOCK."
+            )
+            triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            toast("Player anchor detected")
         }
     }
 
