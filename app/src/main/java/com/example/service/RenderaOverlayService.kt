@@ -100,65 +100,6 @@ import kotlinx.coroutines.launch
  * The dodge gesture itself was fixed in [RenderaAccessibilityService] and
  * [com.example.vision.DodgeGesturePlanner].
  */
-/**
- * One compact line per interval, mirrored to a report file the user can read.
- *
- * The recurring problem with this project has been guessing which stage stopped.
- * Frames never arriving, frames arriving and being rejected, frames analysed
- * with no player lock, and a solved threat with no dispatch all look identical
- * from outside the app, and each was guessed at in turn. One line makes them
- * distinguishable, and the file means a report can be attached to a bug without a
- * cable. `adb logcat -s RenderaOverlay` shows the same lines.
- */
-private fun logDiagnostics() {
-    val sinceFrame = if (lastFrameAtMs == 0L) -1L
-        else SystemClock.elapsedRealtime() - lastFrameAtMs
-    val suppressed = shouldSuppressDodge()
-    val anchorsStale = anchors.calibrated &&
-        anchors.calibratedForWidth != displayWidth
-    val line = "Rendera state:" +
-        " alive=${_status.value.running}" +
-        " capture=${_status.value.capturing}" +
-        " native=${detector?.isNativeAvailable == true}" +
-        " armed=$autoDodgeArmed" +
-        " anchors=${anchors.calibrated}" +
-        " stale=$anchorsStale" +
-        " fps=$latestFps" +
-        " got=${framesReceived}" +
-        " rejected=${framesRejected}" +
-        " analysed=${framesAnalysed}" +
-        " sinceFrameMs=$sinceFrame" +
-        " engine=${"%.1f".format(latestVisionMillis)}ms" +
-        " blobs=${latestAnalysis?.blobCount ?: -1}" +
-        " proj=${latestAnalysis?.projectileCount ?: -1}" +
-        " ball=${latestAnalysis?.ballCount ?: -1}" +
-        " foes=${latestAnalysis?.enemyCount ?: -1}" +
-        " player=${latestAnalysis?.playerDetected ?: false}" +
-        " fromAnchor=${latestAnalysis?.playerFromAnchor ?: false}" +
-        " suppBg=$suppressed" +
-        " fgApp=${RenderaAccessibilityService.foregroundPackage.value}" +
-        " target=${prefs.targetPackage.value}" +
-        " a11y=${RenderaAccessibilityService.isAvailable()}" +
-        " idle=${RenderaAccessibilityService.isIdle()}" +
-        " dodges=$dodgeCount"
-    Log.i(TAG, line)
-    appendReport(line)
-}
-
-/**
- * Appends to a plain text report in the app's own files directory, rotated so it
- * cannot grow without bound.
- */
-private fun appendReport(line: String) {
-    try {
-        val dir = getExternalFilesDir(null) ?: filesDir
-        val f = java.io.File(dir, "rendera-diagnostics.txt")
-        if (f.length() > 256L * 1024L) f.writeText("")
-        f.appendText("${System.currentTimeMillis()} $line\n")
-    } catch (t: Throwable) {
-        Log.w(TAG, "Could not write the diagnostic report", t)
-    }
-}
 
 /**
  * Everything the UI needs to describe what the engine is actually doing, published
@@ -790,6 +731,66 @@ class RenderaOverlayService : Service() {
      * MediaProjection consent dialog can be shown. On Android 14+ the token is
      * single use, so this is not optional after any capture end.
      */
+    /**
+     * One compact line per interval, mirrored to a report file the user can read.
+     *
+     * The recurring problem with this project has been guessing which stage stopped.
+     * Frames never arriving, frames arriving and being rejected, frames analysed
+     * with no player lock, and a solved threat with no dispatch all look identical
+     * from outside the app, and each was guessed at in turn. One line makes them
+     * distinguishable, and the file means a report can be attached to a bug without a
+     * cable. `adb logcat -s RenderaOverlay` shows the same lines.
+     */
+    /**
+     * Appends to a plain text report in the app's own files directory, rotated so it
+     * cannot grow without bound.
+     */
+    private fun appendReport(line: String) {
+        try {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            val f = java.io.File(dir, "rendera-diagnostics.txt")
+            if (f.length() > 256L * 1024L) f.writeText("")
+            f.appendText("${System.currentTimeMillis()} $line\n")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not write the diagnostic report", t)
+        }
+    }
+
+    private fun logDiagnostics() {
+        val sinceFrame = if (lastFrameAtMs == 0L) -1L
+            else SystemClock.elapsedRealtime() - lastFrameAtMs
+        val suppressed = shouldSuppressDodge()
+        val anchorsStale = anchors.calibrated &&
+            anchors.calibratedForWidth != displayWidth
+        val line = "Rendera state:" +
+            " alive=${_status.value.running}" +
+            " capture=${_status.value.capturing}" +
+            " native=${detector?.isNativeAvailable == true}" +
+            " armed=$autoDodgeArmed" +
+            " anchors=${anchors.calibrated}" +
+            " stale=$anchorsStale" +
+            " fps=$latestFps" +
+            " got=${framesReceived}" +
+            " rejected=${framesRejected}" +
+            " analysed=${framesAnalysed}" +
+            " sinceFrameMs=$sinceFrame" +
+            " engine=${"%.1f".format(latestVisionMillis)}ms" +
+            " blobs=${latestAnalysis?.blobCount ?: -1}" +
+            " proj=${latestAnalysis?.projectileCount ?: -1}" +
+            " ball=${latestAnalysis?.ballCount ?: -1}" +
+            " foes=${latestAnalysis?.enemyCount ?: -1}" +
+            " player=${latestAnalysis?.playerDetected ?: false}" +
+            " fromAnchor=${latestAnalysis?.playerFromAnchor ?: false}" +
+            " suppBg=$suppressed" +
+            " fgApp=${RenderaAccessibilityService.foregroundPackage.value}" +
+            " target=${prefs.targetPackage.value}" +
+            " a11y=${RenderaAccessibilityService.isAvailable()}" +
+            " idle=${RenderaAccessibilityService.isIdle()}" +
+            " dodges=$dodgeCount"
+        Log.i(TAG, line)
+        appendReport(line)
+    }
+
     private fun requestCaptureGrant() {
         val open = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
