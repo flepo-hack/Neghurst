@@ -1877,32 +1877,41 @@ class RenderaOverlayService : Service() {
             elevation = dp(12f)
         }
 
-        fun addButton(text: String, onClick: () -> Unit) {
-            val tv = TextView(this).apply {
-                this.text = text
+        /**
+         * One menu row.
+         *
+         * The label auto-sizes inside the view's own `apply`, so it is addressed
+         * through the receiver rather than through the local it is defining -
+         * `tv` is not in scope inside the very expression that creates it. A label
+         * that does not fit is drawn outside the panel, which is what "the text
+         * comes out" was.
+         */
+        fun addButton(label: String, onClick: () -> Unit) {
+            val view = TextView(this).apply {
+                text = label
                 setTextColor(0xFFEDE7FF.toInt())
-                textSize = 13f
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(14f).roundToInt(), 0, dp(14f).roundToInt(), 0)
-                // Fit the label rather than letting it overflow the panel, and
-                // so a longer word never gets drawn outside the window.
+                setPadding(dp(14f).roundToInt(), 0, dp(10f).roundToInt(), 0)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    tv.setAutoSizeTextTypeUniformWithConfiguration(
+                    setAutoSizeTextTypeUniformWithConfiguration(
                         10, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP
                     )
                 } else {
-                    tv.textSize = 13f
+                    textSize = 12f
                 }
-                tv.maxLines = 1
-                tv.ellipsize = android.text.TextUtils.TruncateAt.END
-                tv.setOnClickListener {
+                setOnClickListener { clicked ->
                     // Tear down after this dispatch completes, otherwise removing
                     // a view from inside its own click listener drops the rest of
                     // the gesture and can throw on OEM builds.
-                    it.post { runClick(onClick) }
+                    clicked.post { runClick(onClick) }
                 }
             }
-            root.addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, rowH))
+            root.addView(
+                view,
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, rowH)
+            )
         }
 
         // One button, three jobs: arm, pause, or send the user to the Activity
