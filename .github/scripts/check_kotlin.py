@@ -231,6 +231,26 @@ def main() -> int:
                             f"through the class that declares it."
                         )
 
+    # 9. Every field a test looks up by name must actually be on the wire.
+    #    `at("x")` in the contract test resolves through WIRE_ORDER, and an
+    #    unknown name yields -1, which turns a real assertion into a silent
+    #    comparison against garbage. It happened once: a field that had
+    #    deliberately been taken off the wire was still asserted.
+    tpath = pathlib.Path("app/src/test/java/com/example/vision/NativeVisionEngineContractTest.kt")
+    if tpath.exists():
+        tests = tpath.read_text()
+        kw = set(re.findall(r'val WIRE_ORDER: List<String> = listOf\(\n(.*?)\n        \)',
+                            tuning_path.read_text(), re.S)[0].count('"') and
+                 re.findall(r'"(\w+)"', re.findall(r'val WIRE_ORDER: List<String> = listOf\(\n(.*?)\n        \)',
+                 tuning_path.read_text(), re.S)[0]))
+        for name in sorted(set(re.findall(r'at\("(\w+)"\)', tests))):
+            if name not in kw:
+                findings.append(
+                    f"{tpath}: looks up `{name}` on the wire, but it is not in "
+                    f"VisionTuning.WIRE_ORDER, so wireIndexOf returns -1 and the "
+                    f"assertion compares against garbage"
+                )
+
     if findings:
         for f in findings:
             print(f"::error::{f}")

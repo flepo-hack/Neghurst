@@ -151,7 +151,6 @@ class NativeVisionEngineContractTest {
         assertEquals(t.kindMinHitsBeforeLabelling.toFloat(), at("kindMinHitsBeforeLabelling"), 1e-6f)
         assertEquals(t.trackGatePixels, at("trackGatePixels"), 1e-6f)
         assertEquals(t.trackMinHitsForProjectile.toFloat(), at("trackMinHitsForProjectile"), 1e-6f)
-        assertEquals(t.minTtiSec, at("minTtiSec"), 1e-6f)
         assertEquals(t.lethalTtiSec, at("lethalTtiSec"), 1e-6f)
         assertEquals(t.escapeStepNorm, at("escapeStepNorm"), 1e-6f)
         assertEquals(t.characterSpeedNorm, at("characterSpeedNorm"), 1e-6f)
