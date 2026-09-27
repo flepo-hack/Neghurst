@@ -86,6 +86,10 @@ re-deriving that mapping cost many sessions.
 | "It crashes on start" | `ImageReader.newInstance(0, 0, …)` throws `IllegalArgumentException` when the display has not resolved yet. Guarded. |
 | "The overlay is laggy" | The HUD posted an invalidate for every analysed frame, up to 60/s. Throttled to 10 Hz and skipped when nothing it draws changed. |
 | Everything above was invisible from outside | There was no way to tell "no frames arriving" from "frames arriving and rejected" from "frames analysed, no player lock". There is now a one-line-per-interval diagnostic in logcat (`adb logcat -s RenderaOverlay`) and in `rendera-diagnostics.txt` in the app's files directory. |
+| "It crashes when I pick a game" | Picking a game sends a second `ACTION_START` carrying the **already spent** MediaProjection token. On Android 14+ that token is single use: re-acquiring invalidates the live projection, its callback fires, and the app tears itself down. A second start is now a retarget that never touches consent. |
+| "It says vision engine missing" | That message appeared whenever `detector` was null, which is also true when the capture never started, and it was the **first** branch, so it masked capture, anchors and the accessibility service. It named a missing library that was present and loaded. |
+| "It says NO CAPTURE but I enabled it" | The banner was guessing its own reason and the menu was guessing a different one. Both now use the service's single `buildAdvice()`, which names the first thing actually wrong in stage order. |
+| "Sometimes it just crashes" | `onStartCommand` had no error handling at all. Any throw from `startForeground`, `getParcelableExtra` or `setupCapture` killed the service with a black screen. The whole path is guarded and reports the failure instead. |
 
 ---
 
@@ -140,9 +144,12 @@ constant-velocity Kalman tracking, and closest-point-of-approach solving.
 
 1. Install the APK and read the banner and the diagnostic line. That single line
    names the stage that is failing; do not guess.
-2. If `got=0`, the capture is not delivering frames. `rejected>0` means the
+2. The status pill and the banner now name the failing stage directly, in the
+   order the stages run. Read that line first; it is the same string as the menu
+   and the `note=` field in logcat.
+3. If `got=0`, the capture is not delivering frames. `rejected>0` means the
    reader size still disagrees with the frames. `analysed>0` but `player=false`
    means the green signature needs work, and section 3 item 1 is where to look.
-3. Capture a frame of a Brawl Stars match and measure the actual colours and the
+4. Capture a frame of a Brawl Stars match and measure the actual colours and the
    actual bullet size. That converts section 3 from reasoning into measurement,
    and it is the single highest-value thing anyone can do next.
