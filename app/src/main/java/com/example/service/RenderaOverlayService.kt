@@ -33,6 +33,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.example.BuildConfig
 import com.example.MainActivity
 import com.example.R
 import com.example.RenderaApp
