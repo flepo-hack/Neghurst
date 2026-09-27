@@ -59,7 +59,29 @@ class TacticalHudView(context: Context) : View(context) {
         val autoDodgeArmed: Boolean = false,
         val dodgePlan: String = "",
         val note: String = ""
-    )
+    ) {
+        /**
+         * A cheap content fingerprint, used to decide whether the panel is worth
+         * repainting.
+         *
+         * The HUD is refreshed at most ten times a second and only when this
+         * changes, so an unchanging frame costs nothing instead of invalidating
+         * a view sixty times a second. Derived from the fields the panel actually
+         * draws and deliberately NOT from the entity list, which moves
+         * constantly and would defeat the gate entirely.
+         */
+        fun lines(): String = buildString {
+            append(fps).append('|')
+            append(playerLocked).append(playerFromAnchor).append('|')
+            append(projectiles).append(balls).append(bouncers).append(enemies).append('|')
+            append(threatSeverity).append(timeToImpactMs).append('|')
+            append(escapeHeadingDeg.toInt()).append(escapeSufficient).append('|')
+            append(anchorsCalibrated).append(accessibilityReady)
+                .append(gameForeground).append(autoDodgeArmed).append('|')
+            append(dodgePlan).append('|')
+            append(note)
+        }
+    }
 
     private val density = context.resources.displayMetrics.density
     private fun dp(v: Float) = v * density

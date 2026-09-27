@@ -618,7 +618,7 @@ class RenderaOverlayService : Service() {
             prefs.setAutoDodge(false)
             dodgeState.reset()
             latestAnalysis = null
-            latestHudKey = ""
+            lastHudKey = ""
             removeHud()
             closeMenu()
             removeCalibrationOverlay()
