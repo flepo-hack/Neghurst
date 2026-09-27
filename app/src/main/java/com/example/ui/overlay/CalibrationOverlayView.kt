@@ -76,6 +76,7 @@ class CalibrationOverlayView(
 
     private var dragging = false
     private var dragMoved = false
+    private var tapPending = false
     private var downX = 0f
     private var downY = 0f
     private var lastTouchX = 0f
@@ -337,17 +338,19 @@ class CalibrationOverlayView(
                         return true
                     }
                 }
-                // Anything else MAY become a reticle drag, but does not become
-                // one until the finger has actually moved. A single tap used to
-                // snap the anchor to wherever it landed, which is how the
-                // calibration ended up somewhere nobody intended and looked
-                // broken. Now a tap that is not on a button does nothing.
+                // Anywhere else: a tap places the anchor where you tapped, and a
+                // drag lets you place it precisely. Tap-to-place is the fast path
+                // and the one people actually reach for; a previous version only
+                // moved the reticle on a drag, which made placing a small target
+                // genuinely fiddly. A tap that lands on nothing else still cannot
+                // move a DIFFERENT anchor, because only the active one responds.
                 dragging = true
                 dragMoved = false
                 downX = x
                 downY = y
                 lastTouchX = x
                 lastTouchY = y
+                tapPending = true
                 return true
             }
 
@@ -355,6 +358,7 @@ class CalibrationOverlayView(
                 if (!dragging) return true
                 val totalFromStart = hypot(x - downX, y - downY)
                 if (!dragMoved && totalFromStart < touchSlop) return true
+                tapPending = false
                 // A deliberate drag commits the anchor to the finger, so the
                 // reticle lands exactly where the user put it.
                 dragMoved = true
@@ -364,12 +368,25 @@ class CalibrationOverlayView(
                 return true
             }
 
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                // Always consume the whole gesture, including UP. Returning false
-                // here would let a parent steal the stream and leave the reticle
-                // half moved.
+            MotionEvent.ACTION_UP -> {
+                // A tap that never became a drag places the anchor here.
+                if (tapPending && !dragMoved) {
+                    moveActiveAnchor(x, y, force = true)
+                }
                 dragging = false
                 dragMoved = false
+                tapPending = false
+                downX = 0f
+                downY = 0f
+                return true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                // Always consume the whole gesture. Returning false here would let
+                // a parent steal the stream and leave the reticle half moved.
+                dragging = false
+                dragMoved = false
+                tapPending = false
                 downX = 0f
                 downY = 0f
                 return true
@@ -384,32 +401,40 @@ class CalibrationOverlayView(
     }
 
     private fun moveActiveAnchor(x: Float, y: Float, force: Boolean) {
-        // Reticle centres must be at least their own radius away from the edge,
-        // otherwise half the circle lands off screen and the drag is useless.
-        val cx: Float
-        val cy: Float
+        // Clamp against the view we are actually drawn in, falling back to the
+        // display geometry. Using the display alone made the reticle unable to
+        // reach the right edge whenever the two disagreed, and in landscape that
+        // disagreement is the whole right-hand side of the screen.
+        val vw = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
+        val vh = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
+        val half = dp(18f)
+        val minX = minOf(half, vw * 0.5f)
+        val maxX = maxOf(vw - half, vw * 0.5f)
+        val minY = minOf(half, vh * 0.5f)
+        val maxY = maxOf(vh - half, vh * 0.5f)
+        if (maxX <= minX || maxY <= minY) return
+
+        val cx = x.coerceIn(minX, maxX)
+        val cy = y.coerceIn(minY, maxY)
         when (activeTarget) {
             AnchorTarget.JOYSTICK -> {
-                cx = x.coerceIn(stickRadius, displayWidthPx - stickRadius)
-                cy = y.coerceIn(stickRadius, displayHeightPx - stickRadius)
                 joyX = cx
                 joyY = cy
             }
             AnchorTarget.PLAYER -> {
-                val r = dp(56f)
-                cx = x.coerceIn(r, displayWidthPx - r)
-                cy = y.coerceIn(r, displayHeightPx - r)
                 playerX = cx
                 playerY = cy
             }
         }
+        val bw = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
+        val bh = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
         applyAnchors(
             anchors.copy(
-                joystickX = joyX / displayWidthPx,
-                joystickY = joyY / displayHeightPx,
-                playerX = playerX / displayWidthPx,
-                playerY = playerY / displayHeightPx,
-                joystickRadiusNorm = (stickRadius / displayWidthPx).coerceIn(0.02f, 0.45f)
+                joystickX = (joyX / bw).coerceIn(0f, 1f),
+                joystickY = (joyY / bh).coerceIn(0f, 1f),
+                playerX = (playerX / bw).coerceIn(0f, 1f),
+                playerY = (playerY / bh).coerceIn(0f, 1f),
+                joystickRadiusNorm = (stickRadius / bw).coerceIn(0.02f, 0.45f)
             )
         )
         callbacks.onAnchorMoved(activeTarget, cx, cy)
@@ -425,16 +450,27 @@ class CalibrationOverlayView(
         invalidate()
     }
 
-    private fun currentAnchors(): Anchors = Anchors(
-        joystickX = joyX / displayWidthPx,
-        joystickY = joyY / displayHeightPx,
-        playerX = playerX / displayWidthPx,
-        playerY = playerY / displayHeightPx,
-        joystickRadiusNorm = (stickRadius / displayWidthPx).coerceIn(0.02f, 0.45f),
+    /**
+     * The anchors as this view has them, in the basis it was drawn in.
+     *
+     * Public because the host must persist exactly this: re-deriving them from
+     * the display geometry a second time re-clamps against a different rectangle
+     * and puts the anchor somewhere the user did not put it.
+     */
+    fun currentAnchors(): Anchors {
+        val bw = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
+        val bh = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
+        return Anchors(
+        joystickX = (joyX / bw).coerceIn(0f, 1f),
+        joystickY = (joyY / bh).coerceIn(0f, 1f),
+        playerX = (playerX / bw).coerceIn(0f, 1f),
+        playerY = (playerY / bh).coerceIn(0f, 1f),
+        joystickRadiusNorm = (stickRadius / bw).coerceIn(0.02f, 0.45f),
         calibrated = true,
         calibratedForWidth = displayWidthPx,
         calibratedForHeight = displayHeightPx
-    )
+        )
+    }
 
     /** Compact, log-friendly summary. */
     fun describe(): String {

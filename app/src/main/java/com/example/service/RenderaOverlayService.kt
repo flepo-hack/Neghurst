@@ -40,6 +40,7 @@ import com.example.data.RenderaPreferences
 import com.example.model.DetectionStats
 import com.example.model.ThreatLevel
 import com.example.ui.overlay.CalibrationOverlayView
+import com.example.ui.overlay.RenderaReticleOverlay
 import com.example.ui.overlay.TacticalHudView
 import com.example.vision.AnchorCalibrator
 import com.example.vision.AnchorTarget
@@ -99,6 +100,66 @@ import kotlinx.coroutines.launch
  * The dodge gesture itself was fixed in [RenderaAccessibilityService] and
  * [com.example.vision.DodgeGesturePlanner].
  */
+/**
+ * One compact line per interval, mirrored to a report file the user can read.
+ *
+ * The recurring problem with this project has been guessing which stage stopped.
+ * Frames never arriving, frames arriving and being rejected, frames analysed
+ * with no player lock, and a solved threat with no dispatch all look identical
+ * from outside the app, and each was guessed at in turn. One line makes them
+ * distinguishable, and the file means a report can be attached to a bug without a
+ * cable. `adb logcat -s RenderaOverlay` shows the same lines.
+ */
+private fun logDiagnostics() {
+    val sinceFrame = if (lastFrameAtMs == 0L) -1L
+        else SystemClock.elapsedRealtime() - lastFrameAtMs
+    val suppressed = shouldSuppressDodge()
+    val anchorsStale = anchors.calibrated &&
+        anchors.calibratedForWidth != displayWidth
+    val line = "Rendera state:" +
+        " alive=${_status.value.running}" +
+        " capture=${_status.value.capturing}" +
+        " native=${detector?.isNativeAvailable == true}" +
+        " armed=$autoDodgeArmed" +
+        " anchors=${anchors.calibrated}" +
+        " stale=$anchorsStale" +
+        " fps=$latestFps" +
+        " got=${framesReceived}" +
+        " rejected=${framesRejected}" +
+        " analysed=${framesAnalysed}" +
+        " sinceFrameMs=$sinceFrame" +
+        " engine=${"%.1f".format(latestVisionMillis)}ms" +
+        " blobs=${latestAnalysis?.blobCount ?: -1}" +
+        " proj=${latestAnalysis?.projectileCount ?: -1}" +
+        " ball=${latestAnalysis?.ballCount ?: -1}" +
+        " foes=${latestAnalysis?.enemyCount ?: -1}" +
+        " player=${latestAnalysis?.playerDetected ?: false}" +
+        " fromAnchor=${latestAnalysis?.playerFromAnchor ?: false}" +
+        " suppBg=$suppressed" +
+        " fgApp=${RenderaAccessibilityService.foregroundPackage.value}" +
+        " target=${prefs.targetPackage.value}" +
+        " a11y=${RenderaAccessibilityService.isAvailable()}" +
+        " idle=${RenderaAccessibilityService.isIdle()}" +
+        " dodges=$dodgeCount"
+    Log.i(TAG, line)
+    appendReport(line)
+}
+
+/**
+ * Appends to a plain text report in the app's own files directory, rotated so it
+ * cannot grow without bound.
+ */
+private fun appendReport(line: String) {
+    try {
+        val dir = getExternalFilesDir(null) ?: filesDir
+        val f = java.io.File(dir, "rendera-diagnostics.txt")
+        if (f.length() > 256L * 1024L) f.writeText("")
+        f.appendText("${System.currentTimeMillis()} $line\n")
+    } catch (t: Throwable) {
+        Log.w(TAG, "Could not write the diagnostic report", t)
+    }
+}
+
 /**
  * Everything the UI needs to describe what the engine is actually doing, published
  * as observable state rather than polled from a bare `var`.
@@ -211,6 +272,7 @@ class RenderaOverlayService : Service() {
     private var menuX = 0
     private var menuY = 0
     private var hudView: TacticalHudView? = null
+    private var reticleView: RenderaReticleOverlay? = null
     private var calibrationView: CalibrationOverlayView? = null
 
     private var lastDodgeAtMs = 0L
@@ -242,6 +304,14 @@ class RenderaOverlayService : Service() {
         canDispatch = { RenderaAccessibilityService.isIdle() }
     )
 
+    // Capture and analysis counters. These are the only honest way to tell
+    // "no threat found" apart from "no frames are arriving", which look
+    // identical from the outside and were guessed at repeatedly.
+    @Volatile private var framesReceived = 0L
+    @Volatile private var framesRejected = 0L
+    @Volatile private var framesAnalysed = 0L
+    @Volatile private var lastFrameAtMs = 0L
+
     @Volatile private var autoDodgeArmed = false
 
     /** When the foreground app was first seen to be something other than the game. */
@@ -250,6 +320,7 @@ class RenderaOverlayService : Service() {
     /** Last HUD content key and when it was pushed, for the change/interval gate. */
     @Volatile private var lastHudKey: String = ""
     @Volatile private var lastHudAtMs = 0L
+    @Volatile private var lastReticleAtMs = 0L
     @Volatile private var anchors: Anchors = Anchors.defaultFor(0, 0)
 
     // -----------------------------------------------------------------------
@@ -499,33 +570,11 @@ class RenderaOverlayService : Service() {
 
         // 2. Reader. YUV_420_888 so we can read the luma plane directly.
         frameRing.configure(captureWidth, captureHeight)
-        val reader = ImageReader.newInstance(
-            captureWidth, captureHeight, android.graphics.ImageFormat.YUV_420_888, 2
-        )
-        // A dedicated thread for the copy. Registering on the main handler ran
-        // three per-frame memcpys on the UI thread every frame, which is enough
-        // to make the game stutter and the capture drop frames.
-        val thread = HandlerThread("RenderaCapture", android.os.Process.THREAD_PRIORITY_DISPLAY)
-        captureThread = thread
-        thread.start()
-        val captureHandler = Handler(thread.looper)
-        reader.setOnImageAvailableListener({ r: ImageReader ->
-            // Runs on the reader's own handler thread. Copy the planes out and
-            // hand the image straight back; never hold it, it holds a buffer.
-            var image: Image? = null
-            try {
-                image = r.acquireLatestImage()
-                if (image != null) frameRing.publish(image)
-            } catch (t: Throwable) {
-                Log.w(TAG, "Frame acquisition failed", t)
-            } finally {
-                try {
-                    image?.close()
-                } catch (ignored: Throwable) {
-                    // Nothing useful to do; the image is being discarded anyway.
-                }
-            }
-        }, captureHandler)
+        val reader = createImageReader()
+        if (reader == null) {
+            releaseCapture()
+            return false
+        }
         imageReader = reader
 
         // 3. Virtual display.
@@ -554,6 +603,68 @@ class RenderaOverlayService : Service() {
 
         Log.i(TAG, "Capture started: ${captureWidth}x$captureHeight, display ${displayWidth}x$displayHeight")
         return true
+    }
+
+    /**
+     * Builds an ImageReader at the current capture size, wired to the capture
+     * thread.
+     *
+     * Rebuildable on purpose. The reader's size is fixed at construction, so a
+     * geometry change has to hand the VirtualDisplay a NEW surface; resizing the
+     * display alone leaves the reader expecting the old dimensions and every
+     * frame is then rejected. That is not a rare edge case: Brawl Stars forces
+     * landscape, so the rotation fires almost immediately after the service
+     * starts and killed the capture permanently.
+     *
+     * Returns null rather than throwing, because
+     * `ImageReader.newInstance(0, 0, ...)` is an IllegalArgumentException and a
+     * display that has not resolved yet would take the whole service down on
+     * start.
+     */
+    private fun createImageReader(): ImageReader? {
+        if (captureWidth < 16 || captureHeight < 16) {
+            Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
+            return null
+        }
+        return try {
+            val reader = ImageReader.newInstance(
+                captureWidth, captureHeight, android.graphics.ImageFormat.YUV_420_888, 2
+            )
+            val handler = captureHandler()
+            reader.setOnImageAvailableListener({ r: ImageReader ->
+                // Runs on the capture thread. Copy the planes out and hand the
+                // image straight back; never hold it, it holds a buffer.
+                var image: Image? = null
+                try {
+                    image = r.acquireLatestImage()
+                    if (image != null) {
+                        if (frameRing.publish(image)) framesReceived++ else framesRejected++
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Frame acquisition failed", t)
+                } finally {
+                    try {
+                        image?.close()
+                    } catch (ignored: Throwable) {
+                        // The image is being discarded either way.
+                    }
+                }
+            }, handler)
+            reader
+        } catch (t: Throwable) {
+            Log.e(TAG, "ImageReader creation failed for ${captureWidth}x$captureHeight", t)
+            null
+        }
+    }
+
+    /** One HandlerThread for the plane copies, created on first use. */
+    private fun captureHandler(): Handler {
+        val existing = captureThread
+        if (existing != null && existing.isAlive) return Handler(existing.looper)
+        val thread = HandlerThread("RenderaCapture", android.os.Process.THREAD_PRIORITY_DISPLAY)
+        captureThread = thread
+        thread.start()
+        return Handler(thread.looper)
     }
 
     private fun releaseCapture() {
@@ -774,13 +885,34 @@ class RenderaOverlayService : Service() {
         computeCaptureSize()
         frameRing.configure(captureWidth, captureHeight)
 
-        // Re-point the existing VirtualDisplay at the new size. Recreating the
-        // whole MediaProjection would need fresh user consent, which is not
-        // something we can ask for from the background.
-        try {
-            virtualDisplay?.resize(captureWidth, captureHeight, densityDpi())
-        } catch (t: Throwable) {
-            Log.w(TAG, "VirtualDisplay resize failed", t)
+        // The ImageReader's size is fixed when it is built, so a geometry change
+        // has to hand the VirtualDisplay a NEW surface. Resizing the display
+        // alone leaves the reader expecting the old size, and then every frame is
+        // rejected and the capture is dead for the rest of the session.
+        //
+        // setSurface rather than release + createVirtualDisplay: it needs no new
+        // user consent, which on Android 14+ cannot be obtained from a
+        // background service at all.
+        val newReader = createImageReader()
+        if (newReader == null) {
+            Log.e(TAG, "Could not rebuild the reader for the new size; capture stops here")
+        } else {
+            val display = virtualDisplay
+            if (display == null) {
+                newReader.close()
+            } else {
+                try {
+                    display.resize(captureWidth, captureHeight, densityDpi())
+                    display.setSurface(newReader.surface)
+                    val old = imageReader
+                    imageReader = newReader
+                    old?.close()
+                    Log.i(TAG, "Capture surface swapped to ${captureWidth}x$captureHeight")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Could not swap the capture surface", t)
+                    newReader.close()
+                }
+            }
         }
 
         // The calibration is only valid for the geometry it was taken on.
@@ -796,8 +928,6 @@ class RenderaOverlayService : Service() {
             // dodge after it.
             dodgeState.reset()
         }
-        frameRing.release()
-        frameRing.configure(captureWidth, captureHeight)
         pushMaskRegions()
         repositionOverlayViews()
         calibrationView?.let { view ->
@@ -999,6 +1129,10 @@ class RenderaOverlayService : Service() {
                             screenHeight = displayHeight,
                             collectDebug = prefs.debugOverlayEnabled.value
                         ) }
+                        if (analysis != null) {
+                            framesAnalysed++
+                            lastFrameAtMs = SystemClock.elapsedRealtime()
+                        }
                         latestAnalysis = analysis
                         if (analysis != null) onAnalysis(analysis, d)
                     }
@@ -1016,6 +1150,7 @@ class RenderaOverlayService : Service() {
                     statsWindowStartMs = SystemClock.elapsedRealtime()
                     publishStats()
                     publishStatus()
+                    logDiagnostics()
                 }
             }
         }
@@ -1173,8 +1308,11 @@ class RenderaOverlayService : Service() {
      * guaranteed `CalledFromWrongThreadException` the moment the HUD was on.
      */
     private fun publishHud(analysis: ScreenThreatDetector.Analysis, d: ScreenThreatDetector) {
-        val hud = hudView ?: return
+        // Deliberately not gated on the panel existing: the reticle layer is a
+        // separate full screen window, and returning early when the small panel
+        // failed to add meant the reticles never got any data either.
         if (!prefs.debugOverlayEnabled.value) return
+        val hud = hudView
 
         val currentAnchors = anchors
         val playerRadius = synchronized(detectorLock) { d.currentTuning() }.playerRadiusNorm * displayWidth
@@ -1239,7 +1377,8 @@ class RenderaOverlayService : Service() {
         if (key != lastHudKey || now - lastHudAtMs >= HUD_MIN_INTERVAL_MS) {
             lastHudKey = key
             lastHudAtMs = now
-            mainHandler.post { hudView?.update(snapshot) }
+            if (hud != null) mainHandler.post { hudView?.update(snapshot) }
+        publishReticles(analysis)
         }
     }
 
@@ -1559,7 +1698,14 @@ class RenderaOverlayService : Service() {
     // -----------------------------------------------------------------------
 
     private fun toggleHud() {
-        if (prefs.debugOverlayEnabled.value) showHud() else removeHud()
+        if (prefs.debugOverlayEnabled.value) {
+            showHud()
+        } else {
+            removeHud()
+            // `showHud` returns early when the panel already exists, so switching
+            // it off has to clear both windows explicitly.
+            removeReticles()
+        }
     }
 
     private fun showHud() {
@@ -1582,15 +1728,103 @@ class RenderaOverlayService : Service() {
         try {
             windowManager.addView(view, params)
             hudView = view
-            pushMaskRegions()
         } catch (t: Throwable) {
-            Log.e(TAG, "Could not show the HUD", t)
+            Log.e(TAG, "Could not show the HUD panel", t)
         }
+        showReticles()
+        pushMaskRegions()
+    }
+
+    /**
+     * The full screen reticle layer.
+     *
+     * Separate from the text panel because the panel is 232x140 in one corner
+     * and the whole point is to see things WHERE THEY ARE. Without this the
+     * overlay showed numbers and no picture, which reads as "it sees nothing".
+     *
+     * FLAG_NOT_TOUCHABLE is not optional: this window covers the game, and
+     * without it every touch goes to the overlay instead of Brawl Stars.
+     */
+    private fun showReticles() {
+        if (reticleView != null) return
+        val view = RenderaReticleOverlay(this)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+        }
+        try {
+            windowManager.addView(view, params)
+            reticleView = view
+            Log.i(TAG, "Reticle overlay added")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not show the reticle overlay", t)
+        }
+    }
+
+    /**
+     * Feeds the reticle layer. Throttled on the same clock as the panel, because
+     * this window covers the game and redrawing it every frame is a frame budget
+     * the game needs more.
+     */
+    private fun publishReticles(analysis: ScreenThreatDetector.Analysis) {
+        val view = reticleView ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastReticleAtMs < HUD_MIN_INTERVAL_MS) return
+        lastReticleAtMs = now
+
+        val d = detector ?: return
+        val currentAnchors = anchors
+        val joy = currentAnchors.joystickPx(displayWidth, displayHeight)
+        val joyR = currentAnchors.joystickRadiusPx(displayWidth)
+        val esc = analysis.escape
+        val playerR = d.currentTuning().playerRadiusNorm * displayWidth
+        val marks = RenderaReticleOverlay.marksFromTracks(
+            tracks = d.debugTrackSnapshot(),
+            playerX = analysis.playerX,
+            playerY = analysis.playerY,
+            playerRadius = playerR,
+            playerDetected = analysis.playerDetected,
+            playerFromAnchor = analysis.playerFromAnchor,
+            joystickX = joy.x,
+            joystickY = joy.y,
+            joystickRadius = joyR,
+            enemies = d.debugEnemySnapshot(),
+            threatX = analysis.raw.threatX,
+            threatY = analysis.raw.threatY,
+            hasThreat = analysis.threat != null,
+            escapeX = joy.x + esc.escapeDirX * joyR,
+            escapeY = joy.y + esc.escapeDirY * joyR,
+            hasEscape = analysis.threat != null,
+            density = resources.displayMetrics.density
+        )
+        val frame = RenderaReticleOverlay.Frame(
+            marks = marks,
+            playerDetected = analysis.playerDetected,
+            playerFromAnchor = analysis.playerFromAnchor,
+            captureOk = _status.value.capturing,
+            note = buildAdvice()
+        )
+        mainHandler.post { reticleView?.update(frame) }
+    }
+
+    private fun removeReticles() {
+        reticleView?.let { runCatching { windowManager.removeView(it) } }
+        reticleView = null
     }
 
     private fun removeHud() {
         hudView?.let { runCatching { windowManager.removeView(it) } }
         hudView = null
+        removeReticles()
     }
 
     // -----------------------------------------------------------------------
@@ -1616,27 +1850,23 @@ class RenderaOverlayService : Service() {
         lateinit var overlay: CalibrationOverlayView
         val calibrationCallbacks = object : CalibrationOverlayView.Callbacks {
                 override fun onAnchorMoved(target: AnchorTarget, screenX: Float, screenY: Float) {
-                    val updated = AnchorCalibrator.applyTouch(
-                        anchors = anchors,
-                        target = target,
-                        screenX = screenX,
-                        screenY = screenY,
-                        displayWidth = displayWidth,
-                        displayHeight = displayHeight
-                    )
-                    anchors = updated
+                    // The view has already clamped and normalised into the basis it
+                    // was drawn in. Running that through AnchorCalibrator again,
+                    // with the service's own display size, re-clamps against a
+                    // possibly different rectangle and the reticle snaps away from
+                    // where the user just put it. Take the view's state verbatim.
+                    anchors = overlay.currentAnchors()
+                    val stale = anchors.calibratedForWidth != displayWidth
                     overlay.setStatus(
-                        "${target.name}: ${"%.3f".format(updated.playerX)}, ${"%.3f".format(updated.playerY)}"
+                        "${target.name} at ${"%.2f".format(anchors.playerX)}, " +
+                            "${"%.2f".format(anchors.playerY)}" +
+                            if (stale) " - display size differs, re-check before locking" else ""
                     )
                 }
 
                 override fun onAutoDetectRequested() {
-                    overlay.setStatus("Auto-detect needs a live game frame. " +
-                        "Place the brawler on open ground, then press LOCK & ACTIVATE.")
-                    // Honest limitation: auto-detect runs from the live vision
-                    // loop, not from a one-off screenshot, because the player is
-                    // found on the world-anchored aligned frame which needs the
-                    // engine's motion history.
+                    // The scrim here is nearly transparent, so the engine is
+                    // genuinely still looking at the game underneath.
                     runAutoDetect()
                 }
 
@@ -1693,15 +1923,6 @@ class RenderaOverlayService : Service() {
         }
     }
 
-    /**
-     * Seeds the calibration from the live detector.
-     *
-     * The old implementation read a single `Bitmap` and, when that read failed,
-     * fell back to hard-coded fractions and then **saved them as if the
-     * calibration had succeeded** while reporting "Calibrated &amp; Active". That
-     * is the "auto calib does nothing" symptom. Here a failure is reported and
-     * the previously committed anchors are left untouched.
-     */
     /**
      * Seeds the player anchor from the live analysis.
      *
