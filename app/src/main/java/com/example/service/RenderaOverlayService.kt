@@ -1063,11 +1063,7 @@ class RenderaOverlayService : Service() {
         return now - notInGameSinceMs > BACKGROUND_CONFIRM_MS
     }
 
-    /** True when `pkg` is us, a system surface, or unknown. */
-    private fun isSelfPackage(pkg: String): Boolean =
-        pkg.isEmpty() || pkg == packageName || pkg.startsWith("com.android.systemui")
-
-    private fun onAnalysis(    private fun onAnalysis(analysis: ScreenThreatDetector.Analysis?, d: ScreenThreatDetector) {
+    private fun onAnalysis(analysis: ScreenThreatDetector.Analysis?, d: ScreenThreatDetector) {
         if (analysis == null) return
         latestAnalysis = analysis
 

@@ -154,6 +154,24 @@ def main() -> int:
                     f"parameter is out of scope there; declare it `private val`."
                 )
 
+    # 8. A duplicated declaration on one line. This is the exact shape of the
+    #    damage a line-range edit does when the new text re-emits the line the
+    #    slice already excluded, and the compiler then reports a dozen unrelated
+    #    unresolved references instead of the one real problem.
+    for path in files:
+        for ln, line in enumerate(path.read_text().split("\n"), 1):
+            code = re.sub(r"//.*$", "", line)
+            m = re.match(
+                r"\s*(?:private |internal |public )?(?:fun|val|var|class|object)\s+\w+.*"
+                r"\b(fun|val|var|class|object)\s+(\w+)\s*\(",
+                code,
+            )
+            if m and m.group(2) == m.group(3):
+                findings.append(
+                    f"{path}:{ln}: `{m.group(2)} {m.group(3)}` appears twice on one "
+                    f"line, which is what a bad line-range edit leaves behind"
+                )
+
     # 6. Braces must balance. String surgery on a source file can silently
     #    truncate it - this exact check exists because a line-range edit removed
     #    the last 100 lines of a service and nothing noticed until the compiler
