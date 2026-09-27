@@ -140,6 +140,30 @@ constant-velocity Kalman tracking, and closest-point-of-approach solving.
 
 ---
 
+## 6b. The learning loop
+
+The gap this project kept hitting was that every tuning value was argued from
+reasoning. So the app now records what it actually did, and the repository keeps
+the record:
+
+| where | what |
+|---|---|
+| `RenderaEventLog` (app) | append-only JSONL: session header, per second samples, each threat, each decision with the escape chosen, **and the verdict on whether that dodge worked**, every tagged error collapsed to a count, every calibration with its reason, and a session summary on stop |
+| **SEND DIAGNOSTICS** (in-game menu) | shares the summary as text plus the log's path, so it can be pulled off the device |
+| `diagnostics/*.jsonl` | where a pulled log is committed |
+| `fold_learning.py` + `learn.yml` | folds the logs into `docs/LEARNING.md`: work rate, throughput, player lock rate, error counts, and a ranked list of distinct failures |
+
+**It is deliberately not automatic from the app.** Pushing to a repository needs
+a personal access token inside the APK, and a token in a published APK is public
+the moment the APK is uploaded. The app records, the user shares, the workflow
+learns.
+
+`outcome` records are the whole point. Until a device reported one, every
+tuning decision here was an argument from reasoning, and the reasoning was wrong
+often enough to be worthless.
+
+---
+
 ## 7. What to do next, in priority order
 
 1. Install the APK and read the banner and the diagnostic line. That single line
