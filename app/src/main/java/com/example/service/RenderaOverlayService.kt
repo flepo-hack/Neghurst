@@ -1314,6 +1314,8 @@ class RenderaOverlayService : Service() {
         // failed to add meant the reticles never got any data either.
         if (!prefs.debugOverlayEnabled.value) return
         val hud = hudView
+        // The reticle layer is a separate full screen window with its own data
+        // path, so it must be fed whether or not the small panel exists.
 
         val currentAnchors = anchors
         val playerRadius = synchronized(detectorLock) { d.currentTuning() }.playerRadiusNorm * displayWidth
@@ -1324,7 +1326,9 @@ class RenderaOverlayService : Service() {
         val esc = analysis.escape
         val hasThreat = analysis.threat != null
 
-        val entities = hud.entitiesFor(
+        // The entity list only feeds the small text panel's summary. The reticle
+        // layer builds its own marks, so the panel being absent must not stop it.
+        val entities = if (hud == null) emptyList() else hud.entitiesFor(
             playerX = analysis.playerX,
             playerY = analysis.playerY,
             playerRadius = playerRadius,
