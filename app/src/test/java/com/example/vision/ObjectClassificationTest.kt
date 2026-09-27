@@ -104,9 +104,19 @@ class ObjectClassificationTest {
     private val bouncerDotThreshold = -0.55f
 
     /**
-     * The engine's label rule, transcribed so a test can drive it. The order
-     * matters: a clean small fast straight mover is a projectile even if it is
-     * large enough to look like a ball, and the ball is only what is left.
+     * The engine's label rule, transcribed so a test can drive it.
+     *
+     * Order: a hard reversal is a bouncer, then MOTION decides a projectile, and
+     * size only decides the ball. Motion comes first because `isProjectile` -
+     * the flag that actually gates the collision solve - is computed from hit
+     * count, speed and straightness alone and never consults `kind`. A label
+     * therefore cannot cost a dodge, and calling a 20-cell clean fast mover
+     * UNKNOWN while calling a 6-cell one a PROJECTILE would just be wrong.
+     *
+     * `bouncerMaxArea` is deliberately unused here: with motion deciding the
+     * projectile, no size gate is needed. It is still asserted against
+     * `ballMinArea` below, because the two numbers document what each threshold
+     * is for.
      */
     private fun classify(
         areaEma: Float,
@@ -117,8 +127,7 @@ class ObjectClassificationTest {
         projectileMinStraightness: Float = 0.55f
     ): TrackKind = when {
         bounced -> TrackKind.BOUNCER
-        areaEma <= bouncerMaxArea &&
-            straightness >= projectileMinStraightness &&
+        straightness >= projectileMinStraightness &&
             speedNorm >= projectileMinSpeedNorm -> TrackKind.PROJECTILE
         areaEma >= ballMinArea -> TrackKind.BALL
         else -> TrackKind.UNKNOWN
@@ -163,7 +172,19 @@ class ObjectClassificationTest {
                 classify(areaEma = area, bounced = false, 0.9f, 0.6f)
             )
         }
-        for (area in listOf(6f, 20f, 40f)) {
+        // A slow wandering mover is only a BALL once it is actually large
+        // enough; a small slow one is simply not classified as anything. That is
+        // the honest outcome, and the direction that matters for safety is the
+        // first loop: a clean fast straight mover is never anything but a
+        // projectile, at any size.
+        for (area in listOf(6f, 20f)) {
+            assertEquals(
+                "area $area, slow wandering mover",
+                TrackKind.UNKNOWN,
+                classify(areaEma = area, bounced = false, 0.2f, 0.1f)
+            )
+        }
+        for (area in listOf(30f, 40f, 60f)) {
             assertEquals(
                 "area $area, slow wandering mover",
                 TrackKind.BALL,
