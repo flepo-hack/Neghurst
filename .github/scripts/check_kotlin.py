@@ -158,18 +158,18 @@ def main() -> int:
     #    damage a line-range edit does when the new text re-emits the line the
     #    slice already excluded, and the compiler then reports a dozen unrelated
     #    unresolved references instead of the one real problem.
+    # Bounded and lazy between the two occurrences, so an ordinary signature -
+    # which contains a parameter list full of `val`s and `fun`s - is not matched.
+    # The scan is per line, so two declarations on separate lines never match.
+    dup_re = re.compile(r"\b(fun|val|var|class|object)\s+(\w+)\b[^;]{0,140}?\b\1\s+\2\b")
     for path in files:
         for ln, line in enumerate(path.read_text().split("\n"), 1):
             code = re.sub(r"//.*$", "", line)
-            m = re.match(
-                r"\s*(?:private |internal |public )?(?:fun|val|var|class|object)\s+\w+.*"
-                r"\b(fun|val|var|class|object)\s+(\w+)\s*\(",
-                code,
-            )
-            if m and m.group(2) == m.group(3):
+            m = dup_re.search(code)
+            if m:
                 findings.append(
-                    f"{path}:{ln}: `{m.group(2)} {m.group(3)}` appears twice on one "
-                    f"line, which is what a bad line-range edit leaves behind"
+                    f"{path}:{ln}: `{m.group(1)} {m.group(2)}` is declared twice on "
+                    f"one line, which is the signature of a bad line-range edit"
                 )
 
     # 6. Braces must balance. String surgery on a source file can silently
