@@ -290,32 +290,18 @@ class RenderaOverlayService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
-                @Suppress("DEPRECATION")
-                val data: Intent? = intent?.getParcelableExtra(EXTRA_DATA_INTENT)
-                val gameName = intent?.getStringExtra(EXTRA_GAME_NAME) ?: "Universal"
-                val pkg = intent?.getStringExtra(EXTRA_PACKAGE_NAME) ?: ""
-                if (pkg.isNotEmpty() || gameName != "Universal") {
-                    prefs.setTarget(pkg, gameName)
-                }
-                // startForeground MUST precede getMediaProjection() on API 29+.
-                startInForeground()
-                if (setupCapture(resultCode, data)) {
-                    captureEnded = false
-                    publishStatus(capturing = true)
-                    ensureDetector()
-                    showFloatingBubble()
-                    startVisionLoop()
-                    mainHandler.post {
-                        prefs.setAutoDodge(true)
-                        autoDodgeArmed = true
-                        refreshBubbleUi()
-                        // Say what is actually true rather than a bare "armed":
-                        // with no calibration there is nothing to dodge with yet.
-                        if (!anchors.calibrated) {
-                            toast("Capturing. Long press the bubble to set the anchors.")
-                        }
-                    }
+                // Everything here can throw, and none of it is fatal. A service
+                // that dies during onStartCommand gives the user a black screen
+                // and no explanation, which is the "it crashes when I pick a game"
+                // report. A failure here is reported into the status and as a
+                // toast, and the service stays alive so the bubble still works.
+                try {
+                    startWithConsent(intent)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Start failed", t)
+                    startFailure = "Start failed: ${t.javaClass.simpleName}: ${t.message}"
+                    publishStatus(capturing = false, armed = false)
+                    mainHandler.post { toast("Rendera could not start: ${t.message ?: t.javaClass.simpleName}") }
                 }
             }
         }
@@ -398,6 +384,112 @@ class RenderaOverlayService : Service() {
     // -----------------------------------------------------------------------
     // Foreground notification
     // -----------------------------------------------------------------------
+
+    /**
+     * Starts (or retargets) the service from a consent-carrying Intent.
+     *
+     * ## Why a second start must NOT re-acquire
+     *
+     * Picking a game after capture is already running sends a second
+     * ACTION_START carrying the SAME consent token that has already been spent.
+     * On Android 14+ that token is single use: re-acquiring with it invalidates
+     * the live projection, the first projection's callback fires, and the app
+     * tears itself down - which is exactly the reported "picking a game crashes
+     * it, and afterwards it says no capture".
+     *
+     * So a second start is a RETARGET: update which app we watch, keep the
+     * projection, and do not touch consent at all. A genuinely fresh capture
+     * always comes from the Activity, which is the only place a consent dialog
+     * can be shown.
+     */
+    private fun startWithConsent(intent: Intent?) {
+        val gameName = intent?.getStringExtra(EXTRA_GAME_NAME) ?: "Universal"
+        val pkg = intent?.getStringExtra(EXTRA_PACKAGE_NAME) ?: ""
+        if (pkg.isNotEmpty() || gameName != "Universal") {
+            prefs.setTarget(pkg, gameName)
+        }
+
+        val alreadyCapturing = mediaProjection != null && virtualDisplay != null && !captureEnded
+
+        // startForeground MUST precede getMediaProjection() on API 29+, and it is
+        // safe to call again.
+        startInForeground()
+
+        if (alreadyCapturing) {
+            // Retarget only. The token in this Intent has already been spent.
+            Log.i(TAG, "Retargeting to $pkg without re-acquiring the projection")
+            captureEnded = false
+            projectionStopHandled = false
+            startFailure = null
+            ensureDetector()
+            if (bubbleView == null) showFloatingBubble()
+            startVisionLoop()
+            publishStatus(capturing = true)
+            mainHandler.post { toast("Watching ${pkg.ifEmpty { "the foreground app" }}") }
+            return
+        }
+
+        // No live projection. Either a first start, or one after the projection
+        // ended, in which case this Intent's token is stale and consent has to be
+        // requested again from the Activity.
+        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+        @Suppress("DEPRECATION")
+        val data: Intent? = try {
+            intent?.getParcelableExtra(EXTRA_DATA_INTENT)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not read the consent Intent", t)
+            null
+        }
+
+        if (resultCode == 0 || data == null) {
+            startFailure = "No screen capture consent. Open Rendera and grant it."
+            Log.w(TAG, startFailure!!)
+            showBubbleOnly()
+            publishStatus(capturing = false, armed = false)
+            mainHandler.post { toast("Grant screen recording in Rendera first") }
+            return
+        }
+
+        // A stale projection from a previous session must be released before a
+        // new one is created, or the old one fires onStop and tears down the
+        // new one immediately afterwards.
+        releaseCapture()
+
+        if (!setupCapture(resultCode, data)) {
+            startFailure = "Screen capture could not start. Try granting it again."
+            Log.e(TAG, "setupCapture refused")
+            showBubbleOnly()
+            publishStatus(capturing = false, armed = false)
+            mainHandler.post { toast("Screen capture failed. Tap the bubble to retry.") }
+            return
+        }
+
+        captureEnded = false
+        projectionStopHandled = false
+        startFailure = null
+        publishStatus(capturing = true)
+        ensureDetector()
+        showFloatingBubble()
+        startVisionLoop()
+        mainHandler.post {
+            prefs.setAutoDodge(true)
+            autoDodgeArmed = true
+            publishStatus()
+            refreshBubbleUi()
+            if (!anchors.calibrated) {
+                toast("Capturing. Long press the bubble to set the anchors.")
+            }
+        }
+    }
+
+    /**
+     * A minimal, always-usable shell when capture could not start: the bubble
+     * still appears and still opens the menu, so the user can reach the re-grant
+     * path instead of being left with nothing on screen.
+     */
+    private fun showBubbleOnly() {
+        if (bubbleView == null) showFloatingBubble()
+    }
 
     /**
      * Phase 1 of the foreground handshake: an untyped `startForeground`.
@@ -660,6 +752,11 @@ class RenderaOverlayService : Service() {
      * an Activity can show, so the instruction points there.
      */
     private fun onProjectionStopped() {
+        // A MediaProjection can report the end more than once, and each report
+        // tears the overlay down. Handling the second one re-enters the teardown
+        // and leaves a stale window behind.
+        if (projectionStopHandled) return
+        projectionStopHandled = true
         mainHandler.post {
             captureEnded = true
             publishStatus(capturing = false, armed = false)
@@ -725,6 +822,10 @@ class RenderaOverlayService : Service() {
 
     /** Whether the capture was torn down and has not been re-armed. */
     @Volatile private var captureEnded = false
+    @Volatile private var projectionStopHandled = false
+
+    /** Why the last start attempt failed, or null. Shown instead of a guess. */
+    @Volatile private var startFailure: String? = null
 
     /**
      * Sends the user to the Activity, which is the only place a fresh
@@ -1290,14 +1391,46 @@ class RenderaOverlayService : Service() {
         Log.i(TAG, "stats: $state")
     }
 
-    private fun buildAdvice(): String = when {
-        detector?.isNativeAvailable != true -> "Native vision engine missing from this build."
-        !anchors.calibrated -> "Long press the bubble and lock the anchors."
-        !RenderaAccessibilityService.isAvailable() -> "Enable the Rendera accessibility service."
-        shouldSuppressDodge() ->
-            "${prefs.targetPackage.value} is not in front. Open the game to resume."
-        autoDodgeArmed -> "Armed. ${latestFps} fps, ${frameRing.droppedCount} frames dropped."
-        else -> "Paused. Tap the bubble to arm."
+    /**
+     * One line naming the FIRST thing that is wrong, in the order the stages
+     * actually run.
+     *
+     * The previous version led with "Native vision engine missing from this
+     * build" whenever `detector` was null, which is also true when the capture
+     * simply never started. That single mislabelling is what sent the user - and
+     * several sessions - looking for a missing library that was present and
+     * loaded. Capture comes first because everything else depends on it, and the
+     * three "no engine" cases are now distinguished from each other.
+     */
+    private fun buildAdvice(): String {
+        startFailure?.let { return it }
+        if (!_status.value.capturing) {
+            return if (framesReceived == 0L) {
+                "Not capturing. Tap the bubble to grant screen recording."
+            } else {
+                "Capture stopped. Tap the bubble to retry."
+            }
+        }
+        val d = detector
+            ?: return "Capture is running but the engine has not been created yet."
+        if (!d.isNativeAvailable) {
+            return "librendera_native.so did not load on this device."
+        }
+        if (!RenderaAccessibilityService.isAvailable()) {
+            return "Enable the Rendera accessibility service."
+        }
+        if (!anchors.calibrated) {
+            return "Long press the bubble, AUTO DETECT or set the anchors."
+        }
+        if (shouldSuppressDodge()) {
+            return "${prefs.targetPackage.value} is not in front. Open the game to resume."
+        }
+        return if (autoDodgeArmed) {
+            "Armed. ${latestFps} fps, ${framesReceived} frames, " +
+                "${frameRing.droppedCount} dropped."
+        } else {
+            "Paused. Tap the bubble to arm."
+        }
     }
 
     /**
@@ -1485,7 +1618,15 @@ class RenderaOverlayService : Service() {
                 MotionEvent.ACTION_UP -> {
                     mainHandler.removeCallbacks(longPressRunnable)
                     if (!dragging && !longFired) {
-                        toggleAutoDodge()
+                        // A tap on a bubble with no capture is a request to fix
+                        // it, not a request to arm something that cannot arm. The
+                        // old behaviour silently toggled and nothing happened,
+                        // which read as "tapping does nothing".
+                        if (!_status.value.capturing) {
+                            requestCaptureGrant()
+                        } else {
+                            toggleAutoDodge()
+                        }
                     }
                     // Always consume UP so the gesture stream is not stolen.
                     true

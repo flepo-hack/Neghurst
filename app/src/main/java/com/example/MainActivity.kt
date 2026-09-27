@@ -388,11 +388,17 @@ class MainActivity : ComponentActivity() {
                                 .padding(horizontal = 14.dp, vertical = 6.dp)
                         ) {
                             Text(
+                                // Ordered by the sequence the stages actually
+                                // run in, because the first wrong thing is the only
+                                // one worth reading. Leading with "engine missing"
+                                // whenever the detector had not been created yet
+                                // named a missing library that was present.
                                 text = when {
                                         !serviceStatus.running -> "○ RENDERA IDLE"
+                                        !serviceStatus.capturing ->
+                                            "○ NOT CAPTURING - TAP THE BUBBLE TO GRANT"
                                         !serviceStatus.nativeAvailable ->
-                                            "● ENGINE MISSING FROM THIS BUILD"
-                                        !serviceStatus.capturing -> "● CAPTURE ENDED - TAP TO RE-GRANT"
+                                            "○ ENGINE NOT LOADED ON THIS DEVICE"
                                         !serviceStatus.anchorsCalibrated ->
                                             "● CAPTURING - SET THE ANCHORS"
                                         !serviceStatus.accessibilityReady ->

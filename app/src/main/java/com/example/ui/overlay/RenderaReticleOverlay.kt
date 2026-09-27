@@ -113,10 +113,13 @@ class RenderaReticleOverlay(context: Context) : View(context) {
     }
 
     private fun drawBanner(canvas: Canvas, w: Float, f: Frame) {
+        // The advice string is produced by the service, which is the only place
+        // that knows why. A banner that guesses its own reason disagrees with the
+        // menu, and the disagreement is what makes these states hard to read.
         val text = when {
-            !f.captureOk -> "NO CAPTURE - grant screen recording"
+            !f.captureOk -> f.note.ifEmpty { "NO CAPTURE - grant screen recording" }
             !f.playerDetected && f.playerFromAnchor -> "player: using the calibrated anchor, not detected"
-            !f.playerDetected -> "player: NOT detected - calibrate on open ground"
+            !f.playerDetected -> "player: NOT detected - try AUTO DETECT on open ground"
             else -> "capturing, player locked"
         }
         val pad = dp(6f)
