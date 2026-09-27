@@ -15,6 +15,7 @@
     <string name="bubble_capture_ended">CAPTURE\nENDED\nTap to fix</string>
     <string name="menu_recapture">RE-GRANT SCREEN CAPTURE</string>
     <string name="menu_auto_detect">AUTO DETECT PLAYER</string>
+    <string name="menu_share_diagnostics">SEND DIAGNOSTICS</string>
     <string name="menu_hud">TOGGLE DEBUG HUD</string>
     <string name="menu_reset_calibration">RESET CALIBRATION</string>
     <string name="menu_quit">STOP RENDERA</string>

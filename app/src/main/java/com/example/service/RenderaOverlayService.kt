@@ -46,6 +46,7 @@ import com.example.vision.AnchorCalibrator
 import com.example.vision.AnchorTarget
 import com.example.vision.Anchors
 import com.example.vision.DodgeDecisionState
+import com.example.vision.RenderaEventLog
 import com.example.vision.ScreenThreatDetector
 import com.example.vision.nativebridge.ScreenRegion
 import com.example.vision.nativebridge.VisionTuning
@@ -275,6 +276,13 @@ class RenderaOverlayService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         prefs = RenderaPreferences.get(this)
         statsWindowStartMs = SystemClock.elapsedRealtime()
+        events.beginSession(
+            mapOf(
+                "build" to (BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")"),
+                "device" to (Build.MANUFACTURER + " " + Build.MODEL),
+                "app" to packageName
+            )
+        )
         publishStatus(running = true, capturing = false, armed = false, anchorsOk = false)
     }
 
@@ -299,6 +307,7 @@ class RenderaOverlayService : Service() {
                     startWithConsent(intent)
                 } catch (t: Throwable) {
                     Log.e(TAG, "Start failed", t)
+            events.error("start", t.message ?: "threw", t)
                     startFailure = "Start failed: ${t.javaClass.simpleName}: ${t.message}"
                     publishStatus(capturing = false, armed = false)
                     mainHandler.post { toast("Rendera could not start: ${t.message ?: t.javaClass.simpleName}") }
@@ -349,6 +358,14 @@ class RenderaOverlayService : Service() {
         autoDodgeArmed = false
         dodgeState.reset()
         publishStatus(running = false, capturing = false, armed = false, anchorsOk = false)
+        // Close the session with a verdict summary, so the log always ends with
+        // the number that matters: gestures sent, and how many worked.
+        runCatching { events.flushOpen("service stopped") }
+            .onSuccess {
+                val text = runCatching { events.summaryText() }.getOrNull()
+                if (text != null) Log.i(TAG, "\n" + text)
+            }
+            .onFailure { Log.w(TAG, "Could not close the event log", it) }
     }
 
     /**
@@ -657,6 +674,7 @@ class RenderaOverlayService : Service() {
     private fun createImageReader(): ImageReader? {
         if (captureWidth < 16 || captureHeight < 16) {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
+            events.error("capture", "display size not resolved: ${displayWidth}x$displayHeight")
             return null
         }
         return try {
@@ -675,6 +693,7 @@ class RenderaOverlayService : Service() {
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "Frame acquisition failed", t)
+                    events.error("capture", "acquire: " + (t.message ?: "threw"), t)
                 } finally {
                     try {
                         image?.close()
@@ -686,6 +705,7 @@ class RenderaOverlayService : Service() {
             reader
         } catch (t: Throwable) {
             Log.e(TAG, "ImageReader creation failed for ${captureWidth}x$captureHeight", t)
+            events.error("capture", "ImageReader ${captureWidth}x$captureHeight: " + (t.message ?: "threw"), t)
             null
         }
     }
@@ -823,6 +843,17 @@ class RenderaOverlayService : Service() {
     /** Whether the capture was torn down and has not been re-armed. */
     @Volatile private var captureEnded = false
     @Volatile private var projectionStopHandled = false
+
+    /**
+     * The learning record: what the engine saw, what it decided, and whether the
+     * gesture worked. Without an outcome for each dodge, every tuning decision
+     * in this project has been an argument from reasoning, and the reasoning has
+     * been wrong often enough to be useless.
+     */
+    private val events: RenderaEventLog by lazy { RenderaEventLog(this) }
+
+    /** When the last outcome was judged, so a new one can be allowed. */
+    private var lastOutcomeAtMs = 0L
 
     /** Why the last start attempt failed, or null. Shown instead of a guess. */
     @Volatile private var startFailure: String? = null
@@ -998,6 +1029,7 @@ class RenderaOverlayService : Service() {
         val newReader = createImageReader()
         if (newReader == null) {
             Log.e(TAG, "Could not rebuild the reader for the new size; capture stops here")
+            events.error("capture", "reader rebuild failed at ${captureWidth}x$captureHeight")
         } else {
             val display = virtualDisplay
             if (display == null) {
@@ -1012,6 +1044,7 @@ class RenderaOverlayService : Service() {
                     Log.i(TAG, "Capture surface swapped to ${captureWidth}x$captureHeight")
                 } catch (t: Throwable) {
                     Log.e(TAG, "Could not swap the capture surface", t)
+                    events.error("capture", "surface swap: " + (t.message ?: "threw"), t)
                     newReader.close()
                 }
             }
@@ -1240,6 +1273,7 @@ class RenderaOverlayService : Service() {
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "Vision frame failed", t)
+                    events.error("vision", t.message ?: "threw", t)
                 } finally {
                     frame.recycle()
                     statsFrames++
@@ -1305,9 +1339,20 @@ class RenderaOverlayService : Service() {
         latestAnalysis = analysis
 
         latestVisionMillis = analysis.processMillis
+        val raw = analysis.raw
         if (analysis.escape.hasThreat) {
             latestSeverity = analysis.escape.severity
             threatCount++
+            events.threat(
+                trackId = raw.threatTrackId,
+                x = raw.threatX,
+                y = raw.threatY,
+                vx = raw.threatVx,
+                vy = raw.threatVy,
+                ttiMs = analysis.escape.timeToImpactMs,
+                severity = analysis.escape.severity.name
+            )
+            judgeOutcomes(analysis, raw.threatTrackId)
         } else {
             latestSeverity = ThreatLevel.SAFE
         }
@@ -1317,6 +1362,55 @@ class RenderaOverlayService : Service() {
             maybeDodge(analysis, d)
         }
         publishHud(analysis, d)
+    }
+
+    /**
+     * Judges the dodge that is still in flight.
+     *
+     * This is the number nothing in this project has ever had: for each threat we
+     * acted on, did the threat stop being on a collision course afterwards, or
+     * did it still arrive? Every tuning decision so far - the dodge distance, the
+     * hold time, the escape weights - was argued from reasoning, and the
+     * reasoning was wrong often enough to be worthless.
+     *
+     * A verdict is recorded when the same track either stops being a threat
+     * (worked, or it missed on its own) or survives long enough that the dodge
+     * plainly did not clear it (failed). Judging too eagerly would mark a
+     * successful dodge as failed on the very next frame.
+     */
+    private fun judgeOutcomes(analysis: ScreenThreatDetector.Analysis, trackId: Int) {
+        judgeCandidates(analysis, SystemClock.elapsedRealtime())
+    }
+
+    private fun judgeCandidates(analysis: ScreenThreatDetector.Analysis, now: Long): Int {
+        // The escape planner's own verdict is the cheapest reliable signal: if the
+        // heading it chose still leaves a shot on a collision course, the dodge
+        // did not clear it.
+        val esc = analysis.escape
+        if (!esc.hasThreat) return 0
+        val trackId = analysis.raw.threatTrackId
+        // Only a track we actually planned an escape for can have an outcome.
+        // Judging a threat we never acted on would credit or blame a dodge that
+        // did not happen.
+        if (!events.hasOpenDecision(trackId)) return 0
+        // Give the gesture time to take effect before judging, and never judge
+        // more than one per interval.
+        if (now - lastDodgeAtMs < 260L) return 0
+        if (now - lastOutcomeAtMs < 200L) return 0
+        if (esc.escapeIsSufficient && !esc.partialEscape) {
+            events.recordOutcome(
+                trackId, worked = true, reason = "clear after the dodge",
+                newTtiMs = esc.timeToImpactMs
+            )
+            return 1
+        }
+        events.recordOutcome(
+            trackId, worked = false,
+            reason = "still on a collision course: cleared ${esc.projectilesCleared}" +
+                " of ${esc.projectilesConsidered}, sufficient=${esc.escapeIsSufficient}",
+            newTtiMs = esc.timeToImpactMs
+        )
+        return 1
     }
 
     private fun maybeDodge(analysis: ScreenThreatDetector.Analysis, d: ScreenThreatDetector) {
@@ -1329,19 +1423,42 @@ class RenderaOverlayService : Service() {
         // being swallowed by a cooldown.
         if (!dodgeState.shouldDispatch(analysis, SystemClock.elapsedRealtime())) return
 
+        val esc = analysis.escape
+        events.decide(
+            trackId = analysis.raw.threatTrackId,
+            headingDeg = esc.escapeHeadingDeg,
+            dragPx = esc.joystickDragPx,
+            holdMs = esc.holdMs,
+            requiredTravelPx = esc.requiredTravelPx,
+            expectedTravelPx = esc.expectedTravelPx,
+            sufficient = esc.escapeIsSufficient,
+            cleared = esc.projectilesCleared,
+            considered = esc.projectilesConsidered,
+            playerX = analysis.playerX,
+            playerY = analysis.playerY,
+            screenW = displayWidth,
+            screenH = displayHeight
+        )
+
         val plan = d.planDodge(analysis, displayWidth, displayHeight)
         if (plan.isEmpty) {
             // Refused: no usable plan. Forget the commitment so it is retried
             // once anchors are fixed rather than being treated as handled.
             dodgeState.onDispatchFailed()
+            events.dispatched(analysis.raw.threatTrackId, accepted = false)
             Log.d(TAG, "Dodge suppressed: no usable plan (anchors calibrated=${anchors.calibrated})")
             return
         }
 
+        val trackId = analysis.raw.threatTrackId
+        var settled = false
         val accepted = RenderaAccessibilityService.dispatch(plan) { success ->
+            if (settled) return@dispatch
+            settled = true
+            events.dispatched(trackId, success)
             if (success) {
                 lastDodgeAtMs = SystemClock.elapsedRealtime()
-                lastDodgeAngleDeg = analysis.escape.escapeHeadingDeg
+                lastDodgeAngleDeg = esc.escapeHeadingDeg
                 dodgeCount++
             }
         }
@@ -1772,6 +1889,10 @@ class RenderaOverlayService : Service() {
             closeMenu()
             toast(if (prefs.debugOverlayEnabled.value) "HUD ON" else "HUD OFF")
         }
+        addButton(getString(R.string.menu_share_diagnostics)) {
+            closeMenu()
+            shareDiagnostics()
+        }
         addButton(getString(R.string.menu_reset_calibration)) {
             prefs.clearCalibration()
             anchors = prefs.anchorsFor(displayWidth, displayHeight)
@@ -1820,6 +1941,54 @@ class RenderaOverlayService : Service() {
             pushMaskRegions()
         } catch (t: Throwable) {
             Log.e(TAG, "Could not show the menu", t)
+        }
+    }
+
+    /**
+     * Hands the diagnostics to the user.
+     *
+     * The app cannot write to the repository itself. Doing that would need a
+     * personal access token inside the APK, which is public the moment the APK is
+     * uploaded, and it is not a trade worth making for a diagnostic. So the log
+     * is written to a file the user chooses to share, and the repository side is a
+     * workflow that reads it.
+     *
+     * The share target is `ShareCompat` free and plain `Intent.createChooser`, so
+     * it works on every version without an extra dependency.
+     */
+    private fun shareDiagnostics() {
+        try {
+            val summary = runCatching { events.summaryText() }.getOrDefault("")
+            val dir = getExternalFilesDir(null) ?: filesDir
+            val out = java.io.File(dir, "rendera-diagnostics.txt")
+            out.writeText(
+                buildString {
+                    appendLine(summary)
+                    appendLine()
+                    val log = events.file
+                    if (log.exists()) append(log.readText())
+                }
+            )
+            // Text only, deliberately. `ACTION_SEND` with `EXTRA_STREAM` built
+            // from `Uri.fromFile` throws FileUriExposedException on Android 7 and
+            // later, and fixing that properly means shipping a FileProvider for a
+            // diagnostic. The summary is what a report needs, and the full log's
+            // path is included in the text for anyone who wants the lot.
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "Rendera diagnostics")
+                putExtra(
+                    Intent.EXTRA_TEXT,
+                    summary + "\nFull log: " + out.absolutePath +
+                        "\n(" + out.length() + " bytes)"
+                )
+            }
+            startActivity(Intent.createChooser(share, "Send Rendera diagnostics"))
+            Log.i(TAG, "Diagnostics written to ${out.absolutePath}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Could not share diagnostics", t)
+            runCatching { events.error("export", t.message ?: "threw", t) }
+            mainHandler.post { toast("Could not export the diagnostics") }
         }
     }
 
@@ -1876,6 +2045,7 @@ class RenderaOverlayService : Service() {
             hudView = view
         } catch (t: Throwable) {
             Log.e(TAG, "Could not show the HUD panel", t)
+            events.error("overlay", "hud panel: " + (t.message ?: "threw"), t)
         }
         showReticles()
         pushMaskRegions()
@@ -1913,6 +2083,7 @@ class RenderaOverlayService : Service() {
             Log.i(TAG, "Reticle overlay added")
         } catch (t: Throwable) {
             Log.e(TAG, "Could not show the reticle overlay", t)
+        events.error("overlay", "reticle overlay: " + (t.message ?: "threw"), t)
         }
     }
 
@@ -2019,6 +2190,12 @@ class RenderaOverlayService : Service() {
                 override fun onCommitted(committed: Anchors) {
                     anchors = committed
                     prefs.setAnchors(committed)
+                    events.calibration(
+                        source = "manual", ok = true,
+                        playerX = committed.playerX, playerY = committed.playerY,
+                        joyX = committed.joystickX, joyY = committed.joystickY,
+                        screenW = displayWidth, screenH = displayHeight
+                    )
                     synchronized(detectorLock) {
                         detector?.setAnchors(committed)
                         detector?.applyTuning(tuningFromPrefs())
@@ -2133,6 +2310,13 @@ class RenderaOverlayService : Service() {
             prefs.setAnchors(updated)
             synchronized(detectorLock) { d.setAnchors(updated) }
             dodgeState.reset()
+            events.calibration(
+                source = "auto", ok = true,
+                playerX = updated.playerX, playerY = updated.playerY,
+                joyX = updated.joystickX, joyY = updated.joystickY,
+                screenW = displayWidth, screenH = displayHeight,
+                reason = "player lock ${live.playerDetected} fromAnchor ${live.playerFromAnchor}"
+            )
             calibrationView?.applyAnchors(updated)
             calibrationView?.setStatus(
                 "Player anchor detected at ${"%.2f".format(updated.playerX)}, " +

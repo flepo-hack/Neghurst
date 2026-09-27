@@ -131,27 +131,22 @@ def main() -> int:
         declared = set(
             re.findall(r"\b(?:private\s+|internal\s+|protected\s+)?(?:val|var)\s+(\w+)", body)
         )
-        # A bare constructor parameter is in scope for property initialisers
-        # and init blocks, and OUT of scope in a function body. Scan the bodies:
-        # a `get() = x[..]` AND a `= run { ... x[..] }` are the same bug, and the
-        # second form slipped through when only the first was checked.
-        for m in re.finditer(
-            r"\bget\(\)\s*=\s*|=\s*run\s*\{",
-            body,
-        ):
-            window = body[m.end() : m.end() + 900]
-            stop = window.find("\n    }")
-            if stop > 0:
-                window = window[:stop]
-            for um in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\[", window):
+        # Only a `get() = ...` one-liner. A property INITIALISER may legally
+        # reference a bare constructor parameter, so the earlier version of this
+        # check - which also scanned `= run { ... }` windows - flagged correct
+        # code like `private val appContext = appContext.applicationContext` and
+        # would have blocked a legitimate change. A check with false positives on
+        # valid Kotlin is worse than no check, because people stop reading it.
+        for m in re.finditer(r"\bget\(\)\s*=\s*([^\n]*)", body):
+            for um in re.finditer(r"(?<![\w.])([A-Za-z_]\w*)\s*\[", m.group(1)):
                 name = um.group(1)
                 if name in declared or name in ("it", "this", "int", "float"):
                     continue
-                line_no = body[: m.end() + um.start()].count("\n") + 1
+                line_no = body[: m.start()].count("\n") + 1
                 findings.append(
-                    f"{path}:{line_no}: a member body reads `{name}`, which the "
-                    f"file never declares as a property. A bare constructor "
-                    f"parameter is out of scope there; declare it `private val`."
+                    f"{path}:{line_no}: a getter reads `{name}`, which the file "
+                    f"never declares as a property. A bare constructor parameter "
+                    f"is out of scope in a function body; declare it `private val`."
                 )
 
     # 8. A duplicated declaration on one line. This is the exact shape of the

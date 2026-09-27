@@ -1,0 +1,68 @@
+name: Opi Rendera -lokeista
+
+# Folds device-reported logs into docs/LEARNING.md.
+#
+# The app records what it saw, what it decided and whether the gesture worked; it
+# cannot push to a repository itself, because that would mean a personal access
+# token inside the APK, which is public the moment the APK is published. So this
+# runs when a log is committed, and the repository keeps the history.
+#
+# To contribute a log: use SEND DIAGNOSTICS in the in-game menu, then drop the
+# file in as diagnostics/<anything>.jsonl and open a pull request.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'diagnostics/*.jsonl'
+  pull_request:
+    paths:
+      - 'diagnostics/*.jsonl'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Never let a bad log break the main build; this is a learning job.
+concurrency:
+  group: rendera-learning
+  cancel-in-progress: true
+
+jobs:
+  fold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Ajaa raportin taitto
+        run: python3 .github/scripts/fold_learning.py
+
+      - name: Tarkista että raportti syntyi
+        run: |
+          test -s docs/LEARNING.md || {
+            echo "::error::docs/LEARNING.md was not produced"
+            exit 1
+          }
+          head -40 docs/LEARNING.md
+
+      - name: Commitoi raportti
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/LEARNING.md
+          if git diff --cached --quiet; then
+            echo "no change to report"
+            exit 0
+          fi
+          git commit -m "chore(learning): fold device diagnostics into LEARNING.md
+
+Records what the detector actually did on a real device: frames analysed,
+whether the player locked, whether each dispatched gesture cleared its threat,
+and every distinct error with a count. Appended, so the history accumulates."
+          git push origin HEAD:main
