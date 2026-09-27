@@ -137,9 +137,10 @@ struct EngineConfig {
     // eaten its tail; the ball is a large blob because it is a big rolling
     // sphere, not a sprite the size of a bullet.
     // A bullet's motion residual is a few cells; the ball is a large rolling
-    // sphere. The bands must not overlap, or a mid-sized bullet is labelled a
-    // ball and the dodge path loses it. ballMinArea > bouncerMaxArea is a real
-    // invariant, and ObjectClassificationTest pins it.
+    // sphere. The bands are kept apart so the two numbers stay meaningful as
+    // documentation of what each one is for. They are NOT a safety boundary:
+    // `kind` never gates the collision solve, so no label can cost a dodge.
+    // ballMinArea > bouncerMaxArea is asserted by ObjectClassificationTest.
     int ballMinArea = 24;
     int bouncerMaxArea = 16;
     // A bouncer reverses hard: the new velocity is nearly anti-parallel to the

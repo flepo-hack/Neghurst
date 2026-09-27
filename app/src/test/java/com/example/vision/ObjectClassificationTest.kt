@@ -126,14 +126,17 @@ class ObjectClassificationTest {
 
     @Test
     fun `a large steadily moving blob is the ball`() {
-        // 40 cells, and NOT a clean fast mover, so the projectile test passes
-        // over it and the ball test catches it.
+        // 40 cells, and NOT a clean fast mover, so the motion test passes over
+        // it and the size test catches it.
         assertEquals(TrackKind.BALL, classify(areaEma = 40f, bounced = false, 0.2f, 0.1f))
     }
 
     @Test
     fun `a small fast straight blob is a projectile`() {
         assertEquals(TrackKind.PROJECTILE, classify(areaEma = 6f, bounced = false, 0.95f, 0.6f))
+        // And a LARGE one is still a projectile, which the rule above is the
+        // reason for.
+        assertEquals(TrackKind.PROJECTILE, classify(areaEma = 30f, bounced = false, 0.95f, 0.6f))
     }
 
     @Test
@@ -149,11 +152,42 @@ class ObjectClassificationTest {
     }
 
     @Test
-    fun `a mid sized fast straight mover stays a projectile, not a ball`() {
-        // The regression: with the ball band starting at 14 and the projectile
-        // band ending at 26, a 20-cell bullet satisfied the ball test first and
-        // the dodge path lost it.
-        assertEquals(TrackKind.PROJECTILE, classify(areaEma = 20f, bounced = false, 0.9f, 0.6f))
+    fun `size never decides a label on its own`() {
+        // A clean fast straight mover is a projectile at every size, including
+        // one large enough to look like a ball; a slow wandering blob is a ball
+        // at every size. If size decided, one of these two would be wrong.
+        for (area in listOf(3f, 6f, 20f, 30f, 40f)) {
+            assertEquals(
+                "area $area, clean fast straight mover",
+                TrackKind.PROJECTILE,
+                classify(areaEma = area, bounced = false, 0.9f, 0.6f)
+            )
+        }
+        for (area in listOf(6f, 20f, 40f)) {
+            assertEquals(
+                "area $area, slow wandering mover",
+                TrackKind.BALL,
+                classify(areaEma = area, bounced = false, 0.2f, 0.1f)
+            )
+        }
+    }
+
+    @Test
+    fun `the label is informational and cannot gate a dodge`() {
+        // The invariant that makes the rule above safe: `isProjectile` is derived
+        // from hit count, speed and straightness, and never from `kind`.
+        // Transcribed from the engine's updateTracks on purpose - if someone ever
+        // makes the label gate threat detection, this test should say so.
+        val isProjectile = { hits: Int, speedNorm: Float, straightness: Float ->
+            hits >= 3 && speedNorm >= 0.22f && straightness >= 0.55f
+        }
+        assertEquals(TrackKind.PROJECTILE, classify(40f, false, 0.9f, 0.6f))
+        assertTrue(
+            "a labelled projectile must still be an actionable threat",
+            isProjectile(3, 0.6f, 0.9f)
+        )
+        assertEquals(TrackKind.BALL, classify(40f, false, 0.2f, 0.1f))
+        assertFalse("a slow object is not a threat at all", isProjectile(3, 0.1f, 0.2f))
     }
 
     @Test

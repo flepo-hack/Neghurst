@@ -1298,13 +1298,15 @@ void VisionEngine::updateTracks() {
         // object changed direction, so it is a bouncer regardless of size.
         if (t.bounced) {
             t.kind = TrackKind::kBouncer;
-        } else if (t.areaEma <= static_cast<float>(cfg_.bouncerMaxArea) &&
-                   t.straightness >= cfg_.projectileMinStraightness &&
+        } else if (t.straightness >= cfg_.projectileMinStraightness &&
                    t.speedNorm >= cfg_.projectileMinSpeedNorm) {
-            // A clean, small, fast, straight mover is a projectile. Checked
-            // BEFORE the ball, so a mid-sized projectile is never demoted to a
-            // ball on size alone; the ball is what is left once the projectile
-            // test has passed over it.
+            // Motion first, size second. Whether a threat can kill the brawler is
+            // decided by `isProjectile`, which is computed from hit count, speed
+            // and straightness alone and does NOT consult `kind`. So `kind` is a
+            // label for the HUD and cannot cost a dodge no matter what it says.
+            // Classifying on motion first therefore costs nothing and is right
+            // more often: a fast straight mover is a projectile whether it is
+            // 6 cells or 30, and the ball is what is left over.
             t.kind = TrackKind::kProjectile;
         } else if (t.areaEma >= static_cast<float>(cfg_.ballMinArea)) {
             t.kind = TrackKind::kBall;
