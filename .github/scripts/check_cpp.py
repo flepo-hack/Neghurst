@@ -134,6 +134,53 @@ def parse_header(text: str) -> dict[str, set[str]]:
     return out
 
 
+
+def structural_braces(path: pathlib.Path) -> list[tuple[int, str]]:
+    """
+    Every brace that is code, with its line.
+
+    A regex that strips comments and strings in separate passes gets this wrong:
+    a `//` inside a string literal truncates the line, and a brace inside a KDoc
+    block still counts. This is a single left-to-right pass, so it cannot.
+    """
+    src = path.read_text()
+    out: list[tuple[int, str]] = []
+    i, n, line = 0, len(src), 1
+    while i < n:
+        c = src[i]
+        if c == "\n":
+            line += 1
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (src[i] == "*" and src[i + 1] == "/"):
+                if src[i] == "\n":
+                    line += 1
+                i += 1
+            i += 2
+            continue
+        if c in "\"'":
+            quote = c
+            i += 1
+            while i < n and src[i] != quote:
+                if src[i] == "\\":
+                    i += 1
+                elif src[i] == "\n":
+                    line += 1
+                i += 1
+            i += 1
+            continue
+        if c in "{}":
+            out.append((line, c))
+        i += 1
+    return out
+
+
 def main() -> int:
     if not HEADER.exists():
         print(f"::error::{HEADER} not found")
@@ -156,7 +203,11 @@ def main() -> int:
                 header[st : header.index("\n};", st)],
                 re.M,
             )
-            if n not in ("gridW", "gridH")
+            # Exactly the same set the JNI excludes. These are engine constants
+            # that are not tunables, so they never appear on the wire. This list
+            # must stay identical to the one in the regeneration code; when they
+            # drifted, this check reported a false mismatch.
+            if n not in ("gridW", "gridH", "minTtiSec")
         ]
         m = re.search(r"val WIRE_ORDER:\s*List<String>\s*=\s*listOf\((.*?)\n\s*\)", kt.read_text(), re.S)
         if not m:
@@ -313,6 +364,22 @@ def main() -> int:
             tname = tm.group(1)
             if tname not in members_of:
                 findings.append(f"{rel}: references unknown type rendera::{tname}")
+
+    # --- 5. braces must balance ---------------------------------------------
+    # A line-range edit that drops a closing brace leaves the file a level deep,
+    # and the compiler then reports a dozen unrelated errors instead of the real
+    # problem. The name and alias checks above cannot see it at all.
+    for path in sorted(CPP_DIR.glob("*.cpp")) + sorted(CPP_DIR.glob("*.h")):
+        depth = 0
+        lowest = 0
+        for line_no, ch in structural_braces(path):
+            depth += 1 if ch == "{" else -1
+            lowest = min(lowest, depth)
+        if depth != 0 or lowest < 0:
+            findings.append(
+                f"{path}: braces do not balance (final depth {depth}, lowest "
+                f"{lowest}); a closing brace is missing or extra"
+            )
 
     if findings:
         seen = set()

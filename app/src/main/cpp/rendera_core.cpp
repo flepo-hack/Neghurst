@@ -600,40 +600,69 @@ void VisionEngine::refineMotionAtFullRes() {
 // Stage 3: motion compensated difference + border invalidation
 // ===========================================================================
 
-float VisionEngine::measureAlignmentQuality() const {
-    // Compare the mean absolute difference with and without the estimated
-    // shift. Ratio based, so it is scale free and behaves the same on a bright
-    // snow map and a dark one. Sampled on a coarse lattice, so the cost is
-    // negligible next to the correlation itself.
-    const int sx = static_cast<int>(std::lround(motion_.dx));
-    const int sy = static_cast<int>(std::lround(motion_.dy));
-    const int step = std::max(1, std::min(gridW_, gridH_) / 48);
+float VisionEngine::searchBestAlignment(
+    int radius, int coarseStep, int& outDx, int& outDy) const {
+    // A single shared scratch: the search runs over the whole frame, so this is
+    // the hot loop. Sampling on a coarse lattice keeps it around a millisecond.
+    if (radius < 1) radius = 1;
+    if (coarseStep < 1) coarseStep = 1;
 
+    float bestQ = -1.0f;
+    int bestX = 0, bestY = 0;
+
+    for (int dy = -radius; dy <= radius; dy += coarseStep) {
+        for (int dx = -radius; dx <= radius; dx += coarseStep) {
+            const float q = measureAlignmentQualityAt(dx, dy, coarseStep * 2);
+            if (q > bestQ) { bestQ = q; bestX = dx; bestY = dy; }
+        }
+    }
+    // One local pass, so a shift landing between coarse steps is still found.
+    for (int dy = -coarseStep; dy <= coarseStep; ++dy) {
+        for (int dx = -coarseStep; dx <= coarseStep; ++dx) {
+            const int cx = bestX + dx;
+            const int cy = bestY + dy;
+            if (cx < -radius || cx > radius || cy < -radius || cy > radius) continue;
+            const float q = measureAlignmentQualityAt(cx, cy, 1);
+            if (q > bestQ) { bestQ = q; bestX = cx; bestY = cy; }
+        }
+    }
+
+    outDx = bestX;
+    outDy = bestY;
+    return bestQ;
+}
+
+float VisionEngine::measureAlignmentQualityAt(int sx, int sy, int step) const {
     double alignedSum = 0.0;
     double rawSum = 0.0;
     int64_t n = 0;
-    for (int y = 0; y < gridH_; y += step) {
-        const size_t rowOff = static_cast<size_t>(y) * gridW_;
+    for (int y = step; y < gridH_ - step; y += step) {
         const int py = y + sy;
         if (py < 0 || py >= gridH_) continue;
-        const size_t prevRowOff = static_cast<size_t>(py) * gridW_;
-        for (int x = 0; x < gridW_; x += step) {
+        const uint8_t* prow = prevLuma_.data() + static_cast<size_t>(py) * gridW_;
+        const uint8_t* lrow = luma_.data() + static_cast<size_t>(y) * gridW_;
+        const uint8_t* rrow = prevLuma_.data() + static_cast<size_t>(y) * gridW_;
+        for (int x = step; x < gridW_ - step; x += step) {
             const int px = x + sx;
             if (px < 0 || px >= gridW_) continue;
-            const int c = luma_[rowOff + static_cast<size_t>(x)] & 0xFF;
-            const int pAligned = prevLuma_[prevRowOff + static_cast<size_t>(px)] & 0xFF;
-            const int pRaw = prevLuma_[rowOff + static_cast<size_t>(x)] & 0xFF;
-            alignedSum += std::abs(c - pAligned);
-            rawSum += std::abs(c - pRaw);
+            const int c = lrow[x];
+            alignedSum += std::abs(c - prow[px]);
+            rawSum += std::abs(c - rrow[x]);
             ++n;
         }
     }
     if (n == 0) return 0.0f;
-    const double alignedMean = alignedSum / static_cast<double>(n);
     const double rawMean = rawSum / static_cast<double>(n);
-    if (rawMean <= 1e-6) return 1.0f;  // nothing changed, alignment is trivially perfect
-    const double q = 1.0 - (alignedMean / rawMean);
-    return clampf(static_cast<float>(q), 0.0f, 1.0f);
+    if (rawMean <= 1e-6) return 1.0f;  // nothing changed: trivially perfect
+    const double alignedMean = alignedSum / static_cast<double>(n);
+    return clampf(static_cast<float>(1.0 - alignedMean / rawMean), 0.0f, 1.0f);
+}
+
+bool VisionEngine::isSceneChange() const {
+    if (blobs_.empty()) return false;
+    const float fraction =
+        static_cast<float>(blobs_.size()) / static_cast<float>(totalCells_);
+    return fraction > cfg_.sceneChangeBlobFraction;
 }
 
 void VisionEngine::invalidateBorderRing() {
@@ -1543,34 +1572,75 @@ void VisionEngine::process(uint64_t ptsNanos) {
     if (!diffReady) {
         estimateGlobalMotion();
         refineMotionAtFullRes();
+
+        // Verify the proposal by actually aligning the frames with it. The
+        // correlation can be ambiguous on a low contrast or repetitive scene, and
+        // a wrong shift is far worse than a slightly late one.
+        float quality = 0.0f;
         if (motion_.valid) {
-            // 0..1: the fraction of frame-to-frame difference the estimated
-            // shift removed. Computed the same way the optional OpenCV path
-            // computes it, so `motionMinConfidence` has one meaning in both.
-            const float quality = measureAlignmentQuality();
-            if (quality < cfg_.motionMinConfidence) {
-                // A shift that does not actually explain the frame means the
-                // scene has no usable global motion, not that the terrain moved.
+            quality = measureAlignmentQualityAt(
+                static_cast<int>(std::lround(motion_.dx)),
+                static_cast<int>(std::lround(motion_.dy)),
+                std::max(1, std::min(gridW_, gridH_) / 48));
+        }
+        if (quality < cfg_.motionMinConfidence) {
+            // The proposal does not align. Do NOT fall back to zero: a panned
+            // scene compared against itself at zero shift differs everywhere, the
+            // difference image lights up across the whole frame, and the tracker
+            // fills with the entire arena as moving objects. That is
+            // indistinguishable from a real threat and causes constant, blind
+            // dodging. Search for the shift that actually aligns instead.
+            int bestX = 0, bestY = 0;
+            const float found = searchBestAlignment(
+                cfg_.alignSearchRadius, cfg_.alignSearchCoarseStep, bestX, bestY);
+            if (found > cfg_.motionMinConfidence) {
+                motion_.dx = static_cast<float>(bestX);
+                motion_.dy = static_cast<float>(bestY);
+                motion_.valid = true;
+                motion_.confidence = found;
+                quality = found;
+            } else {
+                // Genuinely unalignable: a loading screen, a cutscene, or a cut
+                // rather than a pan. Zero shift and let the scene-change guard
+                // below refuse to track any of it.
                 motion_.valid = false;
                 motion_.dx = 0.0f;
                 motion_.dy = 0.0f;
-            } else {
-                motion_.confidence = quality;
+                motion_.confidence = 0.0f;
             }
+        } else {
+            motion_.confidence = quality;
         }
+
+        if (motion_.valid) {
+            // Cap the accepted shift at the width of the invalid border ring, so
+            // the ring can always cover the whole warped band. A shift larger than
+            // the ring would leave edge-clamped samples inside the valid region,
+            // which manufacture a full height stripe of false motion.
+            const float cap = static_cast<float>(std::min(gridW_, gridH_) / 4);
+            if (std::fabs(motion_.dx) > cap) motion_.dx = (motion_.dx < 0 ? -1.0f : 1.0f) * cap;
+            if (std::fabs(motion_.dy) > cap) motion_.dy = (motion_.dy < 0 ? -1.0f : 1.0f) * cap;
+        }
+        buildDifference();
     }
-    if (motion_.valid) {
-        // Cap the accepted shift at the width of the invalid border ring, so
-        // the ring can always cover the whole warped band. A shift larger than
-        // the ring would leave edge-clamped samples inside the valid region,
-        // which manufacture a full height stripe of false motion.
-        const float cap = static_cast<float>(std::min(gridW_, gridH_) / 4);
-        if (std::fabs(motion_.dx) > cap) motion_.dx = (motion_.dx < 0 ? -1.0f : 1.0f) * cap;
-        if (std::fabs(motion_.dy) > cap) motion_.dy = (motion_.dy < 0 ? -1.0f : 1.0f) * cap;
-    }
-    buildDifference();
 
     extractBlobs();
+
+    // A frame whose motion covers an implausible fraction of the grid is a scene
+    // change - a cut, a respawn, the map loading - and not a threat. Tracking it
+    // fills the track table with the whole arena, and every one of those "tracks"
+    // is an object the escape planner then tries to dodge. This is the guard that
+    // stops a single bad frame, or a wrong motion shift, from becoming a burst of
+    // blind dodging.
+    if (isSceneChange()) {
+        tracks_.clear();
+        player_ = PlayerState();
+        // A solved threat from a frame now known to be a scene change must not
+        // survive into this one, or the caller sees a confident heading and
+        // dispatches into a respawn screen.
+        threat_ = ThreatSolution();
+    }
+
     detectPlayer();
     detectEnemies();
     updateTracks();

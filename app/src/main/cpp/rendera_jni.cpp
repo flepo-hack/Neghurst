@@ -109,7 +109,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     // The Kotlin side is the single source of truth for tuning, so the whole set
     // is transferred explicitly and atomically. Any layout change must bump
     // CONFIG_FLOATS on the Kotlin side too.
-    constexpr jsize kExpected = 52;
+    constexpr jsize kExpected = 54;
     if (env->GetArrayLength(cfg) < kExpected) return;
 
     jfloat* p = env->GetFloatArrayElements(cfg, nullptr);
@@ -145,29 +145,31 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeConfigure(
     c.ownEffectRadiusNorm           = p[26];
     c.ownEffectTrackNorm            = p[27];
     c.ownEffectMinHits              = static_cast<int>(p[28]);
-    c.maxTracks                     = static_cast<int>(p[29]);
-    c.maxObservations               = static_cast<int>(p[30]);
-    c.ballMinArea                   = static_cast<int>(p[31]);
-    c.bouncerMaxArea                = static_cast<int>(p[32]);
-    c.bouncerDotThreshold           = p[33];
-    c.kindMinHitsBeforeLabelling    = static_cast<int>(p[34]);
-    c.trackGatePixels               = p[35];
-    c.trackProcessPos               = p[36];
-    c.trackProcessVel               = p[37];
-    c.trackMeasureNoise             = p[38];
-    c.trackMaxMisses                = static_cast<int>(p[39]);
-    c.trackMinHitsForProjectile     = static_cast<int>(p[40]);
-    c.projectileMinSpeedNorm        = p[41];
-    c.projectileMinStraightness     = p[42];
-    c.playerRadiusNorm              = p[43];
-    c.projectileRadiusNorm          = p[44];
-    c.reactionHorizonSec            = p[45];
-    c.minTtiSec                     = p[46];
-    c.lethalTtiSec                  = p[47];
-    c.imminentTtiSec                = p[48];
-    c.escapeCandidateCount          = static_cast<int>(p[49]);
-    c.escapeStepNorm                = p[50];
-    c.characterSpeedNorm            = p[51];
+    c.alignSearchRadius             = static_cast<int>(p[29]);
+    c.alignSearchCoarseStep         = static_cast<int>(p[30]);
+    c.sceneChangeBlobFraction       = p[31];
+    c.maxTracks                     = static_cast<int>(p[32]);
+    c.maxObservations               = static_cast<int>(p[33]);
+    c.ballMinArea                   = static_cast<int>(p[34]);
+    c.bouncerMaxArea                = static_cast<int>(p[35]);
+    c.bouncerDotThreshold           = p[36];
+    c.kindMinHitsBeforeLabelling    = static_cast<int>(p[37]);
+    c.trackGatePixels               = p[38];
+    c.trackProcessPos               = p[39];
+    c.trackProcessVel               = p[40];
+    c.trackMeasureNoise             = p[41];
+    c.trackMaxMisses                = static_cast<int>(p[42]);
+    c.trackMinHitsForProjectile     = static_cast<int>(p[43]);
+    c.projectileMinSpeedNorm        = p[44];
+    c.projectileMinStraightness     = p[45];
+    c.playerRadiusNorm              = p[46];
+    c.projectileRadiusNorm          = p[47];
+    c.reactionHorizonSec            = p[48];
+    c.lethalTtiSec                  = p[49];
+    c.imminentTtiSec                = p[50];
+    c.escapeCandidateCount          = static_cast<int>(p[51]);
+    c.escapeStepNorm                = p[52];
+    c.characterSpeedNorm            = p[53];
 
     e->setConfig(c);
     env->ReleaseFloatArrayElements(cfg, p, JNI_ABORT);

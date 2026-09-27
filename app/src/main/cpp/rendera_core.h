@@ -53,11 +53,19 @@ struct EngineConfig {
 
     // --- global motion estimation ---
     int motionMaxShiftHalfRes = 24;  // +/- search range on the half res grid
-    // 0..1 alignment quality: how much of the frame-to-frame difference the
-    // estimated shift actually removed. 0 means the shift explained nothing,
-    // 1 means the aligned frames are identical. Both the core and the optional
-    // OpenCV path compute this same quantity, so the threshold means one thing.
-    float motionMinConfidence = 0.06f;
+    // 0..1 alignment quality: the fraction of frame-to-frame difference the
+    // estimated shift removed. 0 means the shift explained nothing, 1 means the
+    // aligned frames are identical. Both the core and the optional OpenCV path
+    // compute this same quantity, so the threshold means one thing.
+    //
+    // Calibrated against measurement, not guessed. A shift that is correct scores
+    // about 1.0; a shift that is wrong by ONE cell scores about 0.40; no shift at
+    // all scores 0.0. An earlier threshold of 0.06 therefore accepted a
+    // one-cell error and let roughly a third of the frame register as motion,
+    // which is a flood of false threats. 0.75 sits above the one-cell-error
+    // figure and below a genuine alignment, so anything the correlation gets
+    // wrong goes to the fallback search instead.
+    float motionMinConfidence = 0.75f;
     int fineRefineRadius = 2;        // +/- full-res SAD refinement radius
 
     // --- difference / noise ---
@@ -122,6 +130,16 @@ struct EngineConfig {
     // cross the arena.
     float ownEffectTrackNorm = 0.085f;
     int ownEffectMinHits = 2;
+
+    // --- fallback alignment search, used only when the correlation is ambiguous ---
+    // Radius in grid cells. The camera moves roughly two cells per frame at
+    // walking speed and eight at super speed, so fourteen covers ordinary play
+    // with margin while keeping the search inside its cost budget.
+    int alignSearchRadius = 14;
+    int alignSearchCoarseStep = 2;
+    // A frame whose motion covers more than this fraction of the grid is a scene
+    // change, not a threat. Tracking it fills the track table with scenery.
+    float sceneChangeBlobFraction = 0.08f;
     /**
      * How many frames of history a track needs before the "own effect" filter can
      * judge it. Lower than trackMinHitsForProjectile on purpose: a point blank
@@ -432,7 +450,7 @@ private:
     bool computeCorrelatedMotion();
     void refineMotionAtFullRes();
     void buildDifference();
-    float measureAlignmentQuality() const;
+    float measureAlignmentQualityAt(int sx, int sy, int step) const;
     void extractBlobs();
     void detectPlayer();
     void detectEnemies();
@@ -445,6 +463,22 @@ private:
     void invalidateBorderRing();
     float gridToScreenX(float gx) const;
     float gridToScreenY(float gy) const;
+
+    /**
+     * Searches for the integer shift that best aligns the two frames, over a
+     * bounded range, and returns its alignment quality in [0,1].
+     *
+     * This is the fallback for when the phase correlation proposes a shift that
+     * does not actually align. Falling back to zero instead is catastrophic: a
+     * panned scene then differs from itself everywhere, the difference image
+     * lights up across the whole frame, and the tracker fills with the entire
+     * arena as moving objects - which is indistinguishable from a real threat
+     * and produces constant, nonsensical dodging.
+     */
+    float searchBestAlignment(int radius, int coarseStep, int& outDx, int& outDy) const;
+
+    /** True when this frame's motion is too widespread to be a real threat. */
+    bool isSceneChange() const;
 
     EngineConfig cfg_;
 

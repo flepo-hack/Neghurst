@@ -10,29 +10,15 @@ package com.example.vision.nativebridge
  * The field order in [writeInto] is load bearing: it is the wire format shared
  * with `nativeConfigure`. Adding a field means adding it to the end of both.
  */
-data class VisionTuning(
-    // --- global motion estimation ---
-    val motionMaxShiftHalfRes: Int = 24,
-    val motionMinConfidence: Float = 0.06f,
+data class VisionTuning(    val motionMaxShiftHalfRes: Int = 24,
+    val motionMinConfidence: Float = 0.75f,
     val fineRefineRadius: Int = 2,
-
-    // --- difference / noise ---
     val diffNoiseFloor: Int = 18,
     val diffStrongThreshold: Int = 40,
-
-    // --- blob filtering (grid cells) ---
     val blobMinArea: Int = 2,
     val blobMaxArea: Int = 400,
     val blobMinFill: Float = 0.16f,
     val blobMinMeanStrength: Float = 22f,
-
-    // --- player detection ---
-    //
-    // `*Score` values are opponent signals (G - max(R,B) and R - max(G,B)) scaled
-    // to 0..255, so they are hue correct and scale free. The saturation gate is
-    // the second half of the discrimination: Brawl Stars' selection ring scores
-    // about 240 while grass of the same hue sits near 80, so hue alone cannot
-    // separate them.
     val playerMinComponentArea: Int = 8,
     val playerMaxComponentArea: Int = 900,
     val playerMinGreenScore: Float = 58f,
@@ -43,8 +29,6 @@ data class VisionTuning(
     val playerAnchorLocked: Boolean = false,
     val playerAnchorX: Float = 0.5f,
     val playerAnchorY: Float = 0.5f,
-
-    // --- enemy detection ---
     val enemyMinComponentArea: Int = 5,
     val enemyMaxComponentArea: Int = 700,
     val enemyMinRedScore: Float = 55f,
@@ -52,21 +36,23 @@ data class VisionTuning(
     val enemyMinCompactness: Float = 0.18f,
     val maxEnemies: Int = 10,
     val enemyAvoidRadiusNorm: Float = 0.11f,
-
-    // --- tracking ---
-
-    // --- own-effect rejection ---
-    //
-    // Motion on top of the brawler is a splash, a rustle or dust, not a
-    // projectile, and the brawler used to dodge its own footsteps. Exposed here
-    // because on an unfamiliar map the first thing to need tuning is how far
-    // "on top of the brawler" reaches.
     val ownEffectRadiusNorm: Float = 0.055f,
     val ownEffectTrackNorm: Float = 0.085f,
     val ownEffectMinHits: Int = 2,
+    // --- fallback alignment search, used only when the correlation is ambiguous ---
+    // Radius in grid cells. The camera moves roughly two cells per frame at
+    // walking speed and eight at super speed, so fourteen covers ordinary play
+    // with margin while keeping the search inside its cost budget.
+    val alignSearchRadius: Int = 14,
+    // Two, then a one-cell local pass, so a shift landing between coarse
+    // steps is still found.
+    val alignSearchCoarseStep: Int = 2,
+    // A frame whose motion covers more than this fraction of the grid is a
+    // scene change, not a threat. Tracking it fills the track table with
+    // the arena and every one of those tracks gets dodged.
+    val sceneChangeBlobFraction: Float = 0.08f,
     val maxTracks: Int = 16,
     val maxObservations: Int = 48,
-    // --- object classification (label only; does not affect threat detection) ---
     val ballMinArea: Int = 14,
     val bouncerMaxArea: Int = 26,
     val bouncerDotThreshold: Float = -0.55f,
@@ -76,32 +62,19 @@ data class VisionTuning(
     val trackProcessVel: Float = 240f,
     val trackMeasureNoise: Float = 260f,
     val trackMaxMisses: Int = 5,
-    // 2, not 3. At 60 fps a third observation costs 50 ms, and close range
-    // bullets in Brawl Stars arrive in well under 100 ms.
     val trackMinHitsForProjectile: Int = 2,
     val projectileMinSpeedNorm: Float = 0.22f,
     val projectileMinStraightness: Float = 0.55f,
-
-    // --- collision solving ---
     val playerRadiusNorm: Float = 0.052f,
     val projectileRadiusNorm: Float = 0.011f,
     val reactionHorizonSec: Float = 0.42f,
-    /**
-     * A shot closer than this in seconds is not treated as a threat yet. At zero
-     * a shot already on top of the player counts, which is the right default,
-     * but a small positive value suppresses the degenerate case of reacting to a
-     * projectile that is already inside the brawler's own sprite.
-     */
-    val minTtiSec: Float = 0f,
     val lethalTtiSec: Float = 0.17f,
     val imminentTtiSec: Float = 0.29f,
     val escapeCandidateCount: Int = 24,
-    /** Required perpendicular clearance, as a fraction of screen width. */
     val escapeStepNorm: Float = 0.070f,
-    /** Brawler top speed, screen widths per second. */
     val characterSpeedNorm: Float = 0.67f
 ) {
-        fun writeInto(dst: FloatArray) {
+                fun writeInto(dst: FloatArray) {
         require(dst.size >= NativeVisionEngine.CONFIG_FLOATS) {
             "config buffer must hold at least ${NativeVisionEngine.CONFIG_FLOATS} floats, " +
                 "got ${dst.size}"
@@ -136,6 +109,9 @@ data class VisionTuning(
         dst[i++] = ownEffectRadiusNorm
         dst[i++] = ownEffectTrackNorm
         dst[i++] = ownEffectMinHits.toFloat()
+        dst[i++] = alignSearchRadius.toFloat()
+        dst[i++] = alignSearchCoarseStep.toFloat()
+        dst[i++] = sceneChangeBlobFraction
         dst[i++] = maxTracks.toFloat()
         dst[i++] = maxObservations.toFloat()
         dst[i++] = ballMinArea.toFloat()
@@ -153,7 +129,6 @@ data class VisionTuning(
         dst[i++] = playerRadiusNorm
         dst[i++] = projectileRadiusNorm
         dst[i++] = reactionHorizonSec
-        dst[i++] = minTtiSec
         dst[i++] = lethalTtiSec
         dst[i++] = imminentTtiSec
         dst[i++] = escapeCandidateCount.toFloat()
@@ -207,6 +182,9 @@ data class VisionTuning(
         "ownEffectRadiusNorm",
         "ownEffectTrackNorm",
         "ownEffectMinHits",
+        "alignSearchRadius",
+        "alignSearchCoarseStep",
+        "sceneChangeBlobFraction",
         "maxTracks",
         "maxObservations",
         "ballMinArea",
@@ -224,7 +202,6 @@ data class VisionTuning(
         "playerRadiusNorm",
         "projectileRadiusNorm",
         "reactionHorizonSec",
-        "minTtiSec",
         "lethalTtiSec",
         "imminentTtiSec",
         "escapeCandidateCount",
