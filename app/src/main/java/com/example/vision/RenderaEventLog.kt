@@ -398,9 +398,16 @@ class RenderaEventLog(appContext: Context) {
             synchronized(lock) {
                 if (f.exists() && f.length() > MAX_BYTES) {
                     // Keep the tail: the most recent session is the useful one.
-                    val kept = f.readBytes().takeLast(MAX_BYTES / 2)
-                    val start = kept.indexOfFirst { it == '\n'.code.toByte() }.let { if (it < 0) 0 else it + 1 }
-                    f.writeBytes(kept.copyOfRange(start, kept.size))
+                    // `takeLast` on a ByteArray returns a List, not a ByteArray,
+                    // so the cut has to be done with copyOfRange.
+                    val all = f.readBytes()
+                    val half = (MAX_BYTES / 2).toInt().coerceAtMost(all.size)
+                    val kept = all.copyOfRange(all.size - half, all.size)
+                    // Start at a line boundary so the first record is not a
+                    // fragment, which the fold would reject anyway.
+                    val nl = kept.indexOf('\n'.code.toByte())
+                    val from = if (nl < 0) 0 else nl + 1
+                    f.writeBytes(kept.copyOfRange(from, kept.size))
                 }
                 f.appendText(o.toString() + "\n")
             }
