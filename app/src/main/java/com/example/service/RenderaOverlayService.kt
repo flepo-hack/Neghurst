@@ -468,10 +468,13 @@ class RenderaOverlayService : Service() {
             return
         }
 
-        // A stale projection from a previous session must be released before a
-        // new one is created, or the old one fires onStop and tears down the
-        // new one immediately afterwards.
-        releaseCapture()
+        // Retire a stale projection from a previous session, but only if one is
+        // actually live. `releaseCapture` is a no-op when there is nothing to
+        // retire, which is what keeps the foreground state - and therefore the
+        // ability to acquire a projection at all - intact.
+        if (mediaProjection != null || virtualDisplay != null) {
+            releaseCapture()
+        }
 
         if (!setupCapture(resultCode, data)) {
             startFailure = "Screen capture could not start. Try granting it again."
@@ -721,61 +724,86 @@ class RenderaOverlayService : Service() {
         return Handler(thread.looper)
     }
 
+    /**
+     * Retires the current capture, if there is one.
+     *
+     * Every step is conditional on there actually being something live, and that
+     * matters more than it looks: `stopForeground` removes the foreground service
+     * state that a MediaProjection legally requires. An unconditional teardown
+     * that ran before a new projection was acquired therefore pulled the
+     * foreground state out from under `createVirtualDisplay`, which then throws
+     * `IllegalStateException` on Android 14 and later. The symptom was the app
+     * reporting "started" and then, immediately, that recording had ended.
+     *
+     * `suppressProjectionCallback` makes a stop we asked for invisible to our
+     * own `onStop` handler, which is otherwise told about a teardown it
+     * initiated and treats it as an external failure.
+     */
     private fun releaseCapture() {
+        val hadProjection = mediaProjection != null || virtualDisplay != null
+
         try {
             virtualDisplay?.release()
         } catch (t: Throwable) {
             Log.w(TAG, "virtualDisplay release failed", t)
         }
         virtualDisplay = null
+
         try {
             imageReader?.close()
         } catch (t: Throwable) {
             Log.w(TAG, "imageReader close failed", t)
         }
         imageReader = null
+
         try {
             captureThread?.quitSafely()
         } catch (t: Throwable) {
             Log.w(TAG, "capture thread shutdown failed", t)
         }
         captureThread = null
+
         try {
             mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
         } catch (t: Throwable) {
             Log.w(TAG, "unregisterCallback failed", t)
         }
         mediaProjectionCallback = null
-        try {
-            mediaProjection?.stop()
-        } catch (t: Throwable) {
-            Log.w(TAG, "mediaProjection stop failed", t)
-        }
-        mediaProjection = null
-        frameRing.release()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
+        if (hadProjection) {
+            // This stop is ours. A late onStop must not be mistaken for the
+            // system or the user revoking consent, which tears the overlay down.
+            suppressProjectionCallback = true
+            try {
+                mediaProjection?.stop()
+            } catch (t: Throwable) {
+                Log.w(TAG, "mediaProjection stop failed", t)
+            }
+            mediaProjection = null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "stopForeground failed", t)
+                }
+            }
+        } else {
+            // Nothing was live, so the foreground notification must stay: it is
+            // the precondition for acquiring a projection at all.
+            mediaProjection = null
         }
+        suppressProjectionCallback = false
+        frameRing.release()
     }
 
-    /**
-     * The MediaProjection ended.
-     *
-     * It used to tear the whole service down, which is a dead end: the bubble
-     * disappears, nothing explains why, and the only way back is to relaunch the
-     * app and re-grant the projection. A projection can end for reasons that are
-     * not the user's choice - another app starting a cast, a system dialog, an OEM
-     * policy - so the service now stays alive, stops capturing, says so plainly,
-     * and lets the user re-arm from the bubble.
-     *
-     * Re-acquiring the projection itself needs a fresh consent dialog, which only
-     * an Activity can show, so the instruction points there.
-     */
     private fun onProjectionStopped() {
         // A MediaProjection can report the end more than once, and each report
         // tears the overlay down. Handling the second one re-enters the teardown
         // and leaves a stale window behind.
+        if (suppressProjectionCallback) {
+            Log.i(TAG, "Projection stop we initiated; ignoring")
+            return
+        }
         if (projectionStopHandled) return
         projectionStopHandled = true
         mainHandler.post {
@@ -844,6 +872,9 @@ class RenderaOverlayService : Service() {
     /** Whether the capture was torn down and has not been re-armed. */
     @Volatile private var captureEnded = false
     @Volatile private var projectionStopHandled = false
+
+    /** True while we are stopping a projection on purpose. */
+    @Volatile private var suppressProjectionCallback = false
 
     /**
      * The learning record: what the engine saw, what it decided, and whether the
@@ -1521,31 +1552,32 @@ class RenderaOverlayService : Service() {
      * three "no engine" cases are now distinguished from each other.
      */
     private fun buildAdvice(): String {
-        startFailure?.let { return it }
+        // Truncated: the panel shows three lines and a full sentence here
+        // overflows it, which is what "the text comes out" was.
+        startFailure?.let { return it.take(70) }
         if (!_status.value.capturing) {
             return if (framesReceived == 0L) {
-                "Not capturing. Tap the bubble to grant screen recording."
+                "No capture. Tap the bubble."
             } else {
-                "Capture stopped. Tap the bubble to retry."
+                "Capture stopped. Tap to retry."
             }
         }
         val d = detector
-            ?: return "Capture is running but the engine has not been created yet."
+            ?: return "Engine not ready."
         if (!d.isNativeAvailable) {
-            return "librendera_native.so did not load on this device."
+            return "Native engine did not load."
         }
         if (!RenderaAccessibilityService.isAvailable()) {
-            return "Enable the Rendera accessibility service."
+            return "Enable the accessibility service."
         }
         if (!anchors.calibrated) {
-            return "Long press the bubble, AUTO DETECT or set the anchors."
+            return "Set the anchors first."
         }
         if (shouldSuppressDodge()) {
-            return "${prefs.targetPackage.value} is not in front. Open the game to resume."
+            return "${prefs.targetPackage.value} not in front."
         }
         return if (autoDodgeArmed) {
-            "Armed. ${latestFps} fps, ${framesReceived} frames, " +
-                "${frameRing.droppedCount} dropped."
+            "Armed. ${latestFps} fps, ${framesReceived} frames."
         } else {
             "Paused. Tap the bubble to arm."
         }
@@ -1832,8 +1864,12 @@ class RenderaOverlayService : Service() {
             closeMenu()
             return
         }
-        val w = dp(260f).roundToInt()
-        val rowH = dp(44f).roundToInt()
+        // A fixed 260dp was too narrow on some densities and wasted space on
+        // others, and a label that does not fit is drawn outside the panel.
+        // Take the width from the screen, with a floor so the buttons stay
+        // tappable.
+        val w = ((displayWidth * 0.62f).toInt().coerceIn(dp(240f).roundToInt(), dp(420f).roundToInt()))
+        val rowH = dp(46f).roundToInt()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1848,7 +1884,18 @@ class RenderaOverlayService : Service() {
                 textSize = 13f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(14f).roundToInt(), 0, dp(14f).roundToInt(), 0)
-                setOnClickListener {
+                // Fit the label rather than letting it overflow the panel, and
+                // so a longer word never gets drawn outside the window.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    tv.setAutoSizeTextTypeUniformWithConfiguration(
+                        10, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP
+                    )
+                } else {
+                    tv.textSize = 13f
+                }
+                tv.maxLines = 1
+                tv.ellipsize = android.text.TextUtils.TruncateAt.END
+                tv.setOnClickListener {
                     // Tear down after this dispatch completes, otherwise removing
                     // a view from inside its own click listener drops the rest of
                     // the gesture and can throw on OEM builds.
@@ -1911,6 +1958,10 @@ class RenderaOverlayService : Service() {
             text = buildAdvice()
             setTextColor(0xFF9C93B8.toInt())
             textSize = 10f
+            // Bounded: an unbounded TextView here grows the panel and pushes the
+            // buttons off screen, which is what "the text comes out" looks like.
+            maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(dp(14f).roundToInt(), dp(6f).roundToInt(), dp(14f).roundToInt(), dp(6f).roundToInt())
         }
         root.addView(

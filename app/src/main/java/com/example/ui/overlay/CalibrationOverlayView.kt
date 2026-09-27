@@ -156,13 +156,27 @@ class CalibrationOverlayView(
         applyAnchors(anchors)
     }
 
+    /**
+     * The width every fraction is measured against.
+     *
+     * The view's own width once it is laid out, and the display size before
+     * that. Mixing the two is what made calibration unusable: the reticle was
+     * positioned from the view's geometry and then immediately re-derived from
+     * the display's, so it snapped away from the finger on every single touch
+     * whenever the overlay was inset by a cutout, a system bar or letterboxing.
+     */
+    private val baseWidth: Float get() = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
+    private val baseHeight: Float get() = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
+
     fun applyAnchors(value: Anchors) {
         anchors = value
-        joyX = value.joystickX * displayWidthPx
-        joyY = value.joystickY * displayHeightPx
-        playerX = value.playerX * displayWidthPx
-        playerY = value.playerY * displayHeightPx
-        stickRadius = (value.joystickRadiusNorm * displayWidthPx).coerceAtLeast(dp(48f))
+        val w = baseWidth
+        val h = baseHeight
+        joyX = value.joystickX * w
+        joyY = value.joystickY * h
+        playerX = value.playerX * w
+        playerY = value.playerY * h
+        stickRadius = (value.joystickRadiusNorm * w).coerceAtLeast(dp(48f))
         invalidate()
     }
 
@@ -212,6 +226,8 @@ class CalibrationOverlayView(
         commitRect.set(pad + halfW + gap, barTop, w - pad, barTop + barH)
 
         joyRect.set(joyX - stickRadius, joyY - stickRadius, joyX + stickRadius, joyY + stickRadius)
+        // The view is now measurable, so re-derive once from the layout basis.
+        if (width > 0 && baseWidth != displayWidthPx.toFloat()) applyAnchors(anchors)
         playerRect.set(
             playerX - dp(56f), playerY - dp(56f),
             playerX + dp(56f), playerY + dp(56f)
@@ -405,8 +421,8 @@ class CalibrationOverlayView(
         // display geometry. Using the display alone made the reticle unable to
         // reach the right edge whenever the two disagreed, and in landscape that
         // disagreement is the whole right-hand side of the screen.
-        val vw = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
-        val vh = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
+        val vw = baseWidth
+        val vh = baseHeight
         val half = dp(18f)
         val minX = minOf(half, vw * 0.5f)
         val maxX = maxOf(vw - half, vw * 0.5f)
@@ -426,17 +442,19 @@ class CalibrationOverlayView(
                 playerY = cy
             }
         }
-        val bw = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
-        val bh = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
-        applyAnchors(
-            anchors.copy(
-                joystickX = (joyX / bw).coerceIn(0f, 1f),
-                joystickY = (joyY / bh).coerceIn(0f, 1f),
-                playerX = (playerX / bw).coerceIn(0f, 1f),
-                playerY = (playerY / bh).coerceIn(0f, 1f),
-                joystickRadiusNorm = (stickRadius / bw).coerceIn(0.02f, 0.45f)
-            )
+        // Write the fractions directly from the position the finger produced.
+        // Going through applyAnchors here would recompute the pixel positions
+        // from the fractions and undo the move.
+        val bw = baseWidth
+        val bh = baseHeight
+        anchors = anchors.copy(
+            joystickX = (joyX / bw).coerceIn(0f, 1f),
+            joystickY = (joyY / bh).coerceIn(0f, 1f),
+            playerX = (playerX / bw).coerceIn(0f, 1f),
+            playerY = (playerY / bh).coerceIn(0f, 1f),
+            joystickRadiusNorm = (stickRadius / bw).coerceIn(0.02f, 0.45f)
         )
+        invalidate()
         callbacks.onAnchorMoved(activeTarget, cx, cy)
     }
 
@@ -458,8 +476,8 @@ class CalibrationOverlayView(
      * and puts the anchor somewhere the user did not put it.
      */
     fun currentAnchors(): Anchors {
-        val bw = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
-        val bh = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
+        val bw = baseWidth
+        val bh = baseHeight
         return Anchors(
         joystickX = (joyX / bw).coerceIn(0f, 1f),
         joystickY = (joyY / bh).coerceIn(0f, 1f),
