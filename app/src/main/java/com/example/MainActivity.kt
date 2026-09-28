@@ -78,6 +78,7 @@ import com.example.service.RenderaOverlayService
 import com.example.ui.theme.ElectricViolet
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.RenderaTheme
+import com.example.vision.DiagnosticsExport
 import com.example.ui.theme.SafeGreen
 import com.example.ui.theme.ThreatRed
 import com.example.ui.theme.WarningAmber
@@ -235,28 +236,51 @@ class MainActivity : ComponentActivity() {
      */
     private fun shareDiagnosticsFromActivity() {
         try {
-            val dir = getExternalFilesDir(null) ?: filesDir
-            val source = java.io.File(dir, "rendera-events.jsonl")
-            val text = buildString {
+            val status = serviceStatusFlow.value
+            val log = java.io.File(
+                getExternalFilesDir(null) ?: filesDir,
+                "rendera-events.jsonl"
+            )
+            val summary = buildString {
                 appendLine("Rendera ${BuildConfig.VERSION_NAME} on " +
                     "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
                     "Android ${android.os.Build.VERSION.SDK_INT}")
-                appendLine("  service running    ${serviceStatusFlow.value.running}")
-                appendLine("  capture running    ${serviceStatusFlow.value.capturing}")
-                appendLine("  native engine      ${serviceStatusFlow.value.nativeAvailable}")
-                appendLine("  accessibility     ${serviceStatusFlow.value.accessibilityReady}")
-                appendLine("  anchors            ${serviceStatusFlow.value.anchorsCalibrated}")
-                appendLine("  target             ${serviceStatusFlow.value.targetPackage}")
-                appendLine("  foreground app     ${serviceStatusFlow.value.foregroundPackage}")
-                appendLine("  fps                ${serviceStatusFlow.value.fps}")
-                appendLine("  full log: ${source.absolutePath} (${source.length()} bytes)")
+                appendLine("  service running    ${status.running}")
+                appendLine("  capture running    ${status.capturing}")
+                appendLine("  native engine      ${status.nativeAvailable}")
+                appendLine("  accessibility     ${status.accessibilityReady}")
+                appendLine("  anchors            ${status.anchorsCalibrated}")
+                appendLine("  target             ${status.targetPackage}")
+                appendLine("  foreground app     ${status.foregroundPackage}")
+                appendLine("  fps                ${status.fps}")
+                status.stopReason?.let { appendLine("  last stop reason   $it") }
+                if (!status.running) {
+                    appendLine("  NOTE: 'native engine false' here just means the service is")
+                    appendLine("  not running, not that the library failed to load.")
+                }
+                appendLine("  full log: ${log.absolutePath} (${log.length()} bytes)")
             }
-            val share = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_SUBJECT, "Rendera diagnostics")
-                putExtra(Intent.EXTRA_TEXT, text)
+            val report = DiagnosticsExport.buildReport(
+                summary,
+                runCatching { log.readText() }.getOrNull()
+            )
+            // Downloads, not the app-private directory: on Android 11 and later
+            // /Android/data/<pkg> is unreachable without root, which made the one
+            // file that explains a failure the one file nobody could open.
+            val result = DiagnosticsExport.export(this, "rendera-diagnostics", report)
+            if (result.ok) {
+                Toast.makeText(this, "Saved to ${result.path}", Toast.LENGTH_LONG).show()
             }
-            startActivity(Intent.createChooser(share, "Send Rendera diagnostics"))
+            startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "Rendera diagnostics")
+                        putExtra(Intent.EXTRA_TEXT, report)
+                    },
+                    "Send Rendera diagnostics"
+                )
+            )
         } catch (t: Throwable) {
             android.util.Log.w("Rendera", "Could not share diagnostics", t)
             Toast.makeText(this, "Could not export diagnostics", Toast.LENGTH_SHORT).show()
@@ -452,9 +476,17 @@ class MainActivity : ComponentActivity() {
                                 // whenever the detector had not been created yet
                                 // named a missing library that was present.
                                 text = when {
-                                        !serviceStatus.running -> "○ RENDERA IDLE"
+                                        // Not running is checked first and names
+                                        // the cause when there is one, because
+                                        // "service running: false" on its own
+                                        // cannot distinguish never-started from
+                                        // stopped from killed, and those need
+                                        // three different fixes.
+                                        !serviceStatus.running -> serviceStatus.stopReason
+                                            ?.let { "○ STOPPED: ${it.take(28)}" }
+                                            ?: "○ SERVICE NOT RUNNING"
                                         !serviceStatus.capturing ->
-                                            "○ NOT CAPTURING - TAP THE BUBBLE TO GRANT"
+                                            "○ NOT CAPTURING - TAP THE BUBBLE"
                                         !serviceStatus.nativeAvailable ->
                                             "○ ENGINE NOT LOADED ON THIS DEVICE"
                                         !serviceStatus.anchorsCalibrated ->

@@ -30,6 +30,7 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -46,6 +47,7 @@ import com.example.ui.overlay.TacticalHudView
 import com.example.vision.AnchorCalibrator
 import com.example.vision.AnchorTarget
 import com.example.vision.Anchors
+import com.example.vision.DiagnosticsExport
 import com.example.vision.DodgeDecisionState
 import com.example.vision.RenderaEventLog
 import com.example.vision.ScreenThreatDetector
@@ -113,6 +115,8 @@ import kotlinx.coroutines.launch
  */
 data class ServiceStatus(
     val running: Boolean = false,
+    /** Why the service is not running, or null while it is. */
+    val stopReason: String? = null,
     val capturing: Boolean = false,
     val armed: Boolean = false,
     val anchorsCalibrated: Boolean = false,
@@ -290,7 +294,7 @@ class RenderaOverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                stopEverything()
+                stopEverything("user pressed stop")
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -342,7 +346,7 @@ class RenderaOverlayService : Service() {
         stopSelf()
     }
 
-    private fun stopEverything() {
+    private fun stopEverything(reason: String = "stop requested") {
         visionJob?.cancel()
         visionJob = null
         releaseCapture()
@@ -358,6 +362,9 @@ class RenderaOverlayService : Service() {
         }
         autoDodgeArmed = false
         dodgeState.reset()
+        stopReason = reason
+        Log.i(TAG, "Service stopping: $reason")
+        runCatching { events.error("service-stop", reason) }
         publishStatus(running = false, capturing = false, armed = false, anchorsOk = false)
         // Close the session with a verdict summary, so the log always ends with
         // the number that matters: gestures sent, and how many worked.
@@ -394,6 +401,7 @@ class RenderaOverlayService : Service() {
             foregroundPackage = RenderaAccessibilityService.foregroundPackage.value,
             targetPackage = prefs.targetPackage.value,
             suppressedByBackground = shouldSuppressDodge(),
+            stopReason = stopReason,
             fps = latestFps,
             visionMillis = latestVisionMillis
         )
@@ -841,6 +849,16 @@ class RenderaOverlayService : Service() {
         suppressProjectionCallback = false
         frameRing.release()
     }
+
+    /**
+     * Why the service is not running, or null while it is.
+     *
+     * Published, because "service running: false" on its own is the least
+     * informative line that can be printed: it does not say whether the service
+     * never started, was stopped, or was killed, and those need three different
+     * fixes.
+     */
+    @Volatile private var stopReason: String? = null
 
     private fun onProjectionStopped() {
         // A MediaProjection can report the end more than once, and each report
@@ -1942,36 +1960,43 @@ class RenderaOverlayService : Service() {
             closeMenu()
             return
         }
-        // A fixed 260dp was too narrow on some densities and wasted space on
-        // others, and a label that does not fit is drawn outside the panel.
-        // Take the width from the screen, with a floor so the buttons stay
-        // tappable.
-        val w = ((displayWidth * 0.62f).toInt().coerceIn(dp(240f).roundToInt(), dp(420f).roundToInt()))
+        val w = (displayWidth * 0.78f).toInt()
+            .coerceIn(dp(240f).roundToInt(), dp(420f).roundToInt())
         val rowH = dp(46f).roundToInt()
 
-        val root = LinearLayout(this).apply {
+        // The rows live in a scroll view. A bare LinearLayout with WRAP_CONTENT
+        // simply grows past the bottom of the screen and the overflowing rows
+        // cannot be reached at all, which is what "the menu is buggy and I cannot
+        // scroll it" was.
+        val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = panelBackground()
-            elevation = dp(12f)
-            setPadding(0, 0, 0, dp(6f).roundToInt())
+            gravity = Gravity.CENTER_HORIZONTAL
         }
-        // A heading, so the panel is obviously a menu and not a stray rectangle.
-        root.addView(TextView(this).apply {
+        column.addView(TextView(this).apply {
             text = "RENDERA"
             setTextColor(0xFFEDE7FF.toInt())
             textSize = 11f
-            letterSpacing = 0.2f
-            setPadding(dp(14f).roundToInt(), dp(10f).roundToInt(), dp(14f).roundToInt(), dp(4f).roundToInt())
+            setPadding(
+                dp(14f).roundToInt(), dp(10f).roundToInt(),
+                dp(14f).roundToInt(), dp(4f).roundToInt()
+            )
+        })
+        column.addView(TextView(this).apply {
+            text = pendingMenuStatus ?: buildAdvice()
+            pendingMenuStatus = null
+            setTextColor(0xFF9C93B8.toInt())
+            textSize = 10f
+            maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(
+                dp(14f).roundToInt(), dp(2f).roundToInt(),
+                dp(14f).roundToInt(), dp(6f).roundToInt()
+            )
         })
 
         /**
-         * One menu row.
-         *
-         * The label auto-sizes inside the view's own `apply`, so it is addressed
-         * through the receiver rather than through the local it is defining -
-         * `tv` is not in scope inside the very expression that creates it. A label
-         * that does not fit is drawn outside the panel, which is what "the text
-         * comes out" was.
+         * One row, addressed through the receiver so it never references the
+         * local that is being defined.
          */
         fun addButton(label: String, onClick: () -> Unit) {
             val view = TextView(this).apply {
@@ -1995,18 +2020,13 @@ class RenderaOverlayService : Service() {
                     clicked.post { runClick(onClick) }
                 }
             }
-            // A hairline between rows so the buttons read as separate targets.
             view.setBackgroundColor(0x1AFFFFFF)
-            root.addView(
+            column.addView(
                 view,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, rowH)
             )
         }
 
-        // One button, three jobs: arm, pause, or send the user to the Activity
-        // when the capture has ended. A dead-end "capture ended" bubble with a
-        // normal-looking arm button is how the app ended up looking functional
-        // and doing nothing.
         addButton(
             getString(
                 when {
@@ -2024,9 +2044,8 @@ class RenderaOverlayService : Service() {
         }
         addButton(getString(R.string.menu_auto_detect)) {
             closeMenu()
-            // Runs against the real game, with no overlay on top of it. The
-            // overlay used to be the only entry point, which meant the engine
-            // was looking at the overlay's own background.
+            // Runs against the real game with no overlay on top of it: the
+            // overlay's own scrim used to be what the engine was looking at.
             runAutoDetect()
         }
         addButton(getString(R.string.menu_hud)) {
@@ -2040,36 +2059,44 @@ class RenderaOverlayService : Service() {
             shareDiagnostics()
         }
         addButton(getString(R.string.menu_reset_calibration)) {
+            closeMenu()
             prefs.clearCalibration()
             anchors = prefs.anchorsFor(displayWidth, displayHeight)
             synchronized(detectorLock) { detector?.setAnchors(anchors) }
-            closeMenu()
+            dodgeState.reset()
             toast("Calibration cleared")
         }
         addButton(getString(R.string.menu_quit)) {
             closeMenu()
-            stopEverything()
+            stopEverything("user pressed STOP RENDERA")
             stopSelf()
         }
 
-        val status = TextView(this).apply {
-            text = pendingMenuStatus ?: buildAdvice()
-            pendingMenuStatus = null
-            setTextColor(0xFF9C93B8.toInt())
-            textSize = 10f
-            // Bounded: an unbounded TextView here grows the panel and pushes the
-            // buttons off screen, which is what "the text comes out" looks like.
-            maxLines = 3
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(dp(14f).roundToInt(), dp(6f).roundToInt(), dp(14f).roundToInt(), dp(6f).roundToInt())
+        val scroller = ScrollView(this).apply {
+            isFillViewport = true
+            addView(column)
         }
-        root.addView(
-            status,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        )
+        val panel = FrameLayout(this).apply {
+            background = panelBackground()
+            elevation = dp(12f)
+            setPadding(
+                dp(1f).roundToInt(), dp(1f).roundToInt(),
+                dp(1f).roundToInt(), dp(1f).roundToInt()
+            )
+            addView(
+                scroller,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
 
+        // Capped so the panel can never exceed the screen, whatever the status
+        // line says.
+        val maxH = (displayHeight * 0.62f).toInt().coerceAtLeast(rowH * 3)
         val params = WindowManager.LayoutParams(
-            w, LinearLayout.LayoutParams.WRAP_CONTENT, overlayWindowType(),
+            w, maxH, overlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
@@ -2077,22 +2104,14 @@ class RenderaOverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = anchorX.coerceIn(0, (displayWidth - w).coerceAtLeast(0))
-            // dp() returns Float and params.y is Int, so the whole expression
-            // has to be Float until the final conversion.
-            y = (anchorY + dp(72f))
-                .coerceIn(0f, (displayHeight - dp(400f)).coerceAtLeast(0f))
-                .roundToInt()
+            y = (anchorY + dp(72f).roundToInt())
+                .coerceIn(0, (displayHeight - maxH).coerceAtLeast(0))
         }
-
         menuX = params.x
         menuY = params.y
-        try {
-            windowManager.addView(root, params)
-            menuView = root
-            pushMaskRegions()
-        } catch (t: Throwable) {
-            Log.e(TAG, "Could not show the menu", t)
-        }
+        runCatching { windowManager.addView(panel, params) }
+            .onSuccess { menuView = panel; pushMaskRegions() }
+            .onFailure { Log.e(TAG, "Could not show the menu", it) }
     }
 
     /**
@@ -2108,56 +2127,46 @@ class RenderaOverlayService : Service() {
      * it works on every version without an extra dependency.
      */
     private fun shareDiagnostics() {
-        try {
-            val summary = runCatching { events.summaryText() }.getOrDefault("")
-            val dir = getExternalFilesDir(null) ?: filesDir
-            val out = java.io.File(dir, "rendera-diagnostics.txt")
-            out.writeText(
-                buildString {
-                    appendLine(summary)
-                    appendLine()
-                    val log = events.file
-                    if (log.exists()) append(log.readText())
-                }
-            )
-            // Text only, deliberately. `ACTION_SEND` with `EXTRA_STREAM` built
-            // from `Uri.fromFile` throws FileUriExposedException on Android 7 and
-            // later, and fixing that properly means shipping a FileProvider for a
-            // diagnostic. The summary is what a report needs, and the full log's
-            // path is included in the text for anyone who wants the lot.
-            val share = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_SUBJECT, "Rendera diagnostics")
-                putExtra(
-                    Intent.EXTRA_TEXT,
-                    summary + "\nFull log: " + out.absolutePath +
-                        "\n(" + out.length() + " bytes)"
+        val summary = runCatching { events.summaryText() }.getOrDefault("(no summary)")
+        val report = DiagnosticsExport.buildReport(summary, runCatching { events.file.readText() }.getOrNull())
+        val result = DiagnosticsExport.export(this, "rendera-diagnostics", report)
+
+        if (result.ok) {
+            Log.i(TAG, "Diagnostics written to ${result.path}")
+            // Share as well, so it can go straight to a chat without opening a
+            // file manager first. The written file is the durable copy.
+            runCatching {
+                startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Rendera diagnostics")
+                            putExtra(Intent.EXTRA_TEXT, report)
+                        },
+                        "Send Rendera diagnostics"
+                    )
                 )
             }
-            startActivity(Intent.createChooser(share, "Send Rendera diagnostics"))
-            Log.i(TAG, "Diagnostics written to ${out.absolutePath}")
-        } catch (t: Throwable) {
-            Log.e(TAG, "Could not share diagnostics", t)
-            runCatching { events.error("export", t.message ?: "threw", t) }
-            mainHandler.post { toast("Could not export the diagnostics") }
+            toast("Saved to ${result.path}")
+        } else {
+            // Fall back to sharing alone, which needs no filesystem access at all.
+            Log.w(TAG, "Export failed: ${result.why}")
+            runCatching {
+                startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, report)
+                        },
+                        "Send Rendera diagnostics"
+                    )
+                )
+            }.onFailure {
+                runCatching { events.error("export", it.message ?: "threw", it) }
+                toast("Could not export the diagnostics")
+            }
         }
     }
-
-    private fun runClick(action: () -> Unit) {
-        try {
-            action()
-        } catch (t: Throwable) {
-            Log.e(TAG, "Menu action failed", t)
-        }
-    }
-
-    private fun closeMenu() {
-        menuView?.let { runCatching { windowManager.removeView(it) } }
-        menuView = null
-        pushMaskRegions()
-    }
-
-    private fun removeMenu() = closeMenu()
 
     // -----------------------------------------------------------------------
     // HUD
