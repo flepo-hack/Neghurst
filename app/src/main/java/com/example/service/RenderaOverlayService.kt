@@ -203,7 +203,17 @@ class RenderaOverlayService : Service() {
     private var imageReader: ImageReader? = null
     private var captureThread: android.os.HandlerThread? = null
     private var virtualDisplay: VirtualDisplay? = null
-    private val frameRing = YuvFrameRing(poolSize = 3)
+    /** YUV_420_888 capture, where the device cooperates. */
+    private val yuvFrameRing = YuvFrameRing(poolSize = 3)
+
+    /**
+     * `PRIVATE` capture, for the devices that refuse YUV.
+     *
+     * Both rings exist because they are two different buffer layouts, not two
+     * analysers: the engine has a `process` and a `processRgba` entry point and
+     * shares every stage after the pixels arrive.
+     */
+    private val frameRing = FrameRing(poolSize = 3)
 
     private var displayWidth = 0
     private var displayHeight = 0
@@ -670,7 +680,7 @@ class RenderaOverlayService : Service() {
             return false
         }
 
-        frameRing.configure(captureWidth, captureHeight)
+        yuvFrameRing.configure(captureWidth, captureHeight)
         val reader = createImageReader()
         if (reader == null) {
             fail("reader", "Could not create a frame reader at ${captureWidth}x$captureHeight.")
@@ -733,41 +743,110 @@ class RenderaOverlayService : Service() {
     private fun createImageReader(): ImageReader? {
         if (captureWidth < 16 || captureHeight < 16) {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
-            events.error("capture", "display size not resolved: ${displayWidth}x$displayHeight")
             return null
         }
+        val format = if (captureMode == CaptureMode.PRIVATE) {
+            android.graphics.ImageFormat.PRIVATE
+        } else {
+            android.graphics.ImageFormat.YUV_420_888
+        }
         return try {
-            val reader = ImageReader.newInstance(
-                captureWidth, captureHeight, android.graphics.ImageFormat.YUV_420_888, 2
+            val reader = ImageReader.newInstance(captureWidth, captureHeight, format, 2)
+            reader.setOnImageAvailableListener(
+                { r: ImageReader -> onFrameAvailable(r) },
+                captureHandler()
             )
-            val handler = captureHandler()
-            reader.setOnImageAvailableListener({ r: ImageReader ->
-                // Runs on the capture thread. Copy the planes out and hand the
-                // image straight back; never hold it, it holds a buffer.
-                var image: Image? = null
-                try {
-                    image = r.acquireLatestImage()
-                    if (image != null) {
-                        if (frameRing.publish(image)) framesReceived++ else framesRejected++
-                    }
-                } catch (t: Throwable) {
-                    Log.w(TAG, "Frame acquisition failed", t)
-                    events.error("capture", "acquire: " + (t.message ?: "threw"), t)
-                } finally {
-                    try {
-                        image?.close()
-                    } catch (ignored: Throwable) {
-                        // The image is being discarded either way.
-                    }
-                }
-            }, handler)
             reader
         } catch (t: Throwable) {
-            Log.e(TAG, "ImageReader creation failed for ${captureWidth}x$captureHeight", t)
-            events.error("capture", "ImageReader ${captureWidth}x$captureHeight: " + (t.message ?: "threw"), t)
+            Log.e(TAG, "ImageReader(${captureWidth}x$captureHeight, $format) failed", t)
+            runCatching { events.error("capture", "ImageReader: ${t.message}", t) }
             null
         }
     }
+
+    /** How the device chose to deliver frames. */
+    private enum class CaptureMode { YUV, PRIVATE }
+
+    @Volatile
+    private var captureMode = CaptureMode.YUV
+
+    /**
+     * One frame from the reader.
+     *
+     * A `YUV_420_888` reader is refused by some devices: the producer's format
+     * comes back `PRIVATE` (0x1) against a reader configured for 0x23, and
+     * `acquireLatestImage()` throws `UnsupportedOperationException` **on every
+     * frame**. Observed at over 1400 errors per second on one test device, with
+     * the capture looking healthy from the outside the whole time.
+     *
+     * So the first format mismatch switches the session to `PRIVATE` permanently
+     * and rebuilds the reader, rather than swallowing the exception and carrying on
+     * producing nothing.
+     */
+    private fun onFrameAvailable(reader: ImageReader) {
+        var image: Image? = null
+        try {
+            image = reader.acquireLatestImage() ?: return
+            val ok = if (captureMode == CaptureMode.PRIVATE) {
+                frameRing.publishPrivate(image)
+            } else {
+                yuvFrameRing.publish(image)
+            }
+            if (ok) framesReceived++ else framesRejected++
+        } catch (t: Throwable) {
+            val msg = t.message ?: ""
+            if (captureMode == CaptureMode.YUV && msg.contains("buffer format")) {
+                switchToPrivateCapture()
+            } else {
+                runCatching { events.error("capture", msg.take(120), t) }
+            }
+        } finally {
+            runCatching { image?.close() }
+        }
+    }
+
+    /**
+     * Rebuilds the capture in `PRIVATE` mode.
+     *
+     * `PRIVATE` gives a `HardwareBuffer` instead of planes, so the engine gets
+     * interleaved RGBA and computes luma and the opponent signals itself. That is
+     * a copy the YUV path does not need, and it is also more accurate: the
+     * signals are channel comparisons in the source space rather than a YUV round
+     * trip.
+     */
+    private fun switchToPrivateCapture() {
+        Log.w(TAG, "device refuses YUV_420_888; switching to PRIVATE capture")
+        runCatching { events.error("capture", "YUV_420_888 refused, using PRIVATE") }
+        captureMode = CaptureMode.PRIVATE
+        // The stride and format are only known once a buffer is locked, so the
+        // pool is sized generously and validated on the first frame.
+        val stride = ((captureWidth * 4 + 63) / 64) * 64
+        frameRing.configure(captureWidth, captureHeight, stride, android.graphics.PixelFormat.RGBA_8888)
+        yuvFrameRing.release()
+        frameRing.releaseAll()
+        val old = imageReader
+        imageReader = createImageReader()
+        val replacement = imageReader
+        if (replacement == null) {
+            Log.e(TAG, "could not build a PRIVATE reader; capture is unavailable")
+            startFailure = "This device refused both YUV and PRIVATE capture."
+            publishStatus(capturing = false, armed = false)
+            return
+        }
+        runCatching {
+            virtualDisplay?.setSurface(replacement.surface)
+            old?.close()
+        }.onFailure {
+            Log.e(TAG, "could not repoint the virtual display", it)
+        }
+        startFailure = null
+        publishStatus(capturing = true)
+        Log.i(TAG, "PRIVATE capture active at ${captureWidth}x$captureHeight")
+    }
+
+    private fun yuvRowStride(): Int = ((captureWidth + 15) / 16) * 16
+
+    private fun yuvFormatIsYuv(): Int = android.graphics.PixelFormat.YUV_420_888
 
     /** One HandlerThread for the plane copies, created on first use. */
     private fun captureHandler(): Handler {
@@ -848,7 +927,8 @@ class RenderaOverlayService : Service() {
             mediaProjection = null
         }
         suppressProjectionCallback = false
-        frameRing.release()
+        yuvFrameRing.release()
+        frameRing.releaseAll()
     }
 
     /**
@@ -999,6 +1079,7 @@ class RenderaOverlayService : Service() {
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
+        val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV_420_888"
         val suppressed = shouldSuppressDodge()
         val anchorsStale = anchors.calibrated &&
             anchors.calibratedForWidth != displayWidth
@@ -1025,6 +1106,10 @@ class RenderaOverlayService : Service() {
             " fgApp=${RenderaAccessibilityService.foregroundPackage.value}" +
             " target=${prefs.targetPackage.value}" +
             " a11y=${RenderaAccessibilityService.isAvailable()}" +
+            " mode=$mode" +
+            " yuvGot=${yuvFrameRing.receivedCount}" +
+            " privGot=${frameRing.receivedCount}" +
+            " privDrop=${frameRing.droppedCount}" +
             " idle=${RenderaAccessibilityService.isIdle()}" +
             " dodges=$dodgeCount"
         Log.i(TAG, line)
@@ -1132,7 +1217,7 @@ class RenderaOverlayService : Service() {
 
         Log.i(TAG, "Display changed ${beforeW}x$beforeH -> ${displayWidth}x$displayHeight")
         computeCaptureSize()
-        frameRing.configure(captureWidth, captureHeight)
+        yuvFrameRing.configure(captureWidth, captureHeight)
 
         // The ImageReader's size is fixed when it is built, so a geometry change
         // has to hand the VirtualDisplay a NEW surface. Resizing the display
@@ -1334,14 +1419,16 @@ class RenderaOverlayService : Service() {
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
             while (isActive) {
-                val frame = frameRing.take()
+                val privateMode = captureMode == CaptureMode.PRIVATE
+                val frame: Any? = if (privateMode) frameRing.take() else yuvFrameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)
                     continue
                 }
                 try {
                     val d = detector
-                    if (d != null && frameRing.width > 0) {
+                    val haveFrame = if (privateMode) frameRing.width > 0 else yuvFrameRing.width > 0
+                    if (d != null && haveFrame) {
                         // Re-read anchors and tuning when the user changes them,
                         // without a listener per write.
                         val liveAnchors = prefs.anchors.value
@@ -1365,21 +1452,35 @@ class RenderaOverlayService : Service() {
                         // A backgrounded app is now handled where it actually
                         // costs something: dodging, not analysing. See
                         // [shouldSuppressDodge].
-                        val analysis = synchronized(detectorLock) { d.process(
-                            yPlane = frame.y,
-                            yStride = frame.yStride,
-                            uPlane = frame.u,
-                            vPlane = frame.v,
-                            uvStride = frame.uvStride,
-                            frameWidth = frame.width,
-                            frameHeight = frame.height,
-                            chromaWidth = frame.chromaWidth,
-                            chromaHeight = frame.chromaHeight,
-                            ptsNanos = System.nanoTime(),
-                            screenWidth = displayWidth,
-                            screenHeight = displayHeight,
-                            collectDebug = prefs.debugOverlayEnabled.value
-                        ) }
+                        val analysis = synchronized(detectorLock) {
+                            if (frame == null) {
+                                null
+                            } else if (privateMode) {
+                                val f = frame as FrameRing.Frame
+                                d.processRgba(
+                                    rgba = f.rgba,
+                                    rowStride = f.rowStride,
+                                    frameWidth = f.width,
+                                    frameHeight = f.height,
+                                    ptsNanos = System.nanoTime(),
+                                    screenWidth = displayWidth,
+                                    screenHeight = displayHeight,
+                                    collectDebug = prefs.debugOverlayEnabled.value
+                                )
+                            } else {
+                                val f = frame as YuvFrameRing.Frame
+                                d.process(
+                                    yPlane = f.y, yStride = f.yStride,
+                                    uPlane = f.u, vPlane = f.v, uvStride = f.uvStride,
+                                    frameWidth = f.width, frameHeight = f.height,
+                                    chromaWidth = f.chromaWidth, chromaHeight = f.chromaHeight,
+                                    ptsNanos = System.nanoTime(),
+                                    screenWidth = displayWidth,
+                                    screenHeight = displayHeight,
+                                    collectDebug = prefs.debugOverlayEnabled.value
+                                )
+                            }
+                        }
                         if (analysis != null) {
                             framesAnalysed++
                             lastFrameAtMs = SystemClock.elapsedRealtime()
@@ -1602,8 +1703,8 @@ class RenderaOverlayService : Service() {
         val state = DetectionStats(
             isRunning = true,
             fps = latestFps,
-            frameCount = frameRing.consumedCount,
-            droppedFrames = frameRing.droppedCount,
+            frameCount = framesReceived,
+            droppedFrames = if (captureMode == CaptureMode.PRIVATE) frameRing.droppedCount else yuvFrameRing.droppedCount,
             threatsDetected = threatCount,
             dodgesExecuted = dodgeCount,
             lastDodgeAngleDeg = lastDodgeAngleDeg,
@@ -1672,7 +1773,8 @@ class RenderaOverlayService : Service() {
         // Armed but seeing nothing is a distinct state from armed and working,
         // and reporting both as "Armed" is why arming appeared to do nothing.
         if (framesAnalysed == 0L) {
-            return "Armed, but no frames analysed. ${lastFrameAge()}."
+            val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"
+            return "No frames via $mode. ${lastFrameAge()}"
         }
         if (latestAnalysis?.playerDetected != true) {
             return "Armed, no player lock. Using the anchor."
@@ -1963,7 +2065,7 @@ class RenderaOverlayService : Service() {
         }
         val w = (displayWidth * 0.78f).toInt()
             .coerceIn(dp(240f).roundToInt(), dp(420f).roundToInt())
-        val rowH = dp(46f).roundToInt()
+        val rowH = dp(44f).roundToInt()
 
         // The rows live in a scroll view. A bare LinearLayout with WRAP_CONTENT
         // simply grows past the bottom of the screen and the overflowing rows
@@ -2074,7 +2176,11 @@ class RenderaOverlayService : Service() {
         }
 
         val scroller = ScrollView(this).apply {
-            isFillViewport = true
+            // A visible scrollbar is the only way a user can tell the panel
+            // scrolls rather than being stuck.
+            isVerticalScrollBarEnabled = true
+            isVerticalScrollBarAlwaysDrawn = true
+            scrollBarStyle = android.view.View.SCROLLBARS_INSIDE_OVERLAY
             addView(column)
         }
         val panel = FrameLayout(this).apply {
@@ -2095,9 +2201,15 @@ class RenderaOverlayService : Service() {
 
         // Capped so the panel can never exceed the screen, whatever the status
         // line says.
-        val maxH = (displayHeight * 0.62f).toInt().coerceAtLeast(rowH * 3)
+        // Sized so the panel is a little shorter than its content on a normal
+        // phone, which is what makes the ScrollView actually scrollable. Sized to
+        // fit, it never needs to.
+        val maxH = (displayHeight * 0.70f).toInt().coerceAtLeast(rowH * 4)
         val params = WindowManager.LayoutParams(
             w, maxH, overlayWindowType(),
+            // NOT NOT_TOUCHABLE: the panel has to receive the drag for the
+            // ScrollView to consume it. NOT_FOCUSABLE is kept, because the game
+            // must not lose focus, and it does not stop touch delivery.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
@@ -2439,10 +2551,12 @@ class RenderaOverlayService : Service() {
             // Say WHY, with the frame counts, instead of a bare "no frame yet".
             // This button previously looked broken because every failure looked
             // identical from the menu.
-            val why = "no frame analysed yet (got ${framesReceived}, " +
+            val why = "no frame analysed yet " +
+                "(mode ${if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"}, " +
+                "got ${framesReceived}, rejected ${framesRejected}, " +
                 "analysed ${framesAnalysed})"
             mainHandler.post {
-                toast(why)
+                Toast.makeText(this, why, Toast.LENGTH_LONG).show()
                 openMenuWithStatus(why)
             }
             return
@@ -2459,9 +2573,11 @@ class RenderaOverlayService : Service() {
             return
         }
         if (!live.playerDetected && !anchors.calibrated) {
-            val why = "player not found on open ground (blobs ${live.blobCount})"
+            val why = "player not found on open ground " +
+                "(green ${live.raw.playerGreenness.toInt()}, " +
+                "blobs ${live.blobCount}, enemies ${live.enemyCount})"
             mainHandler.post {
-                toast(why)
+                Toast.makeText(this, why, Toast.LENGTH_LONG).show()
                 openMenuWithStatus(why)
             }
             return
@@ -2492,7 +2608,12 @@ class RenderaOverlayService : Service() {
                     "${"%.2f".format(updated.playerY)}. Drag to adjust, then LOCK."
             )
             triggerHapticFeedback(HapticFeedbackConstants.CONFIRM)
-            toast("Player anchor detected")
+            Toast.makeText(
+                this,
+                "Player detected at ${"%.2f".format(updated.playerX)}, " +
+                    "${"%.2f".format(updated.playerY)}",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 

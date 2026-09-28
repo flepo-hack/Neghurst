@@ -220,47 +220,16 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeSetMask(
  *
  * Returns 1 when a threat was solved, 0 otherwise. Returns -1 on a bad handle.
  */
-JNIEXPORT jint JNICALL
-Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
-        JNIEnv* env, jobject thiz, jlong handle,
-        jobject yBuf, jint yStride,
-        jobject uBuf, jobject vBuf, jint uvStride,
-        jint fullW, jint fullH, jint chromaW, jint chromaH,
-        jlong ptsNanos,
-        jfloatArray outF, jintArray outI) {
-    auto* e = asEngine(handle);
-    if (e == nullptr) return -1;
-    if (yBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
-
-    auto* y = static_cast<uint8_t*>(env->GetDirectBufferAddress(yBuf));
-    jlong yCap = env->GetDirectBufferCapacity(yBuf);
-    auto* u = uBuf ? static_cast<uint8_t*>(env->GetDirectBufferAddress(uBuf)) : nullptr;
-    auto* v = vBuf ? static_cast<uint8_t*>(env->GetDirectBufferAddress(vBuf)) : nullptr;
-
-    if (y == nullptr || yStride <= 0) return 0;
-    // The buffer must actually hold a full frame, otherwise reading it is UB.
-    const jlong needY = static_cast<jlong>(yStride) * static_cast<jlong>(fullH);
-    if (yCap > 0 && yCap < needY) return 0;
-
-    if (u != nullptr && v != nullptr && chromaW > 0 && chromaH > 0 && uvStride > 0) {
-        const jlong needUv = static_cast<jlong>(uvStride) * static_cast<jlong>(chromaH);
-        const jlong uCap = env->GetDirectBufferCapacity(uBuf);
-        const jlong vCap = env->GetDirectBufferCapacity(vBuf);
-        if ((uCap >= 0 && uCap < needUv) || (vCap >= 0 && vCap < needUv)) {
-            u = nullptr;
-            v = nullptr;
-        }
-    } else {
-        u = nullptr;
-        v = nullptr;
-    }
-
-    if (!e->ingestYuv(y, yStride, u, v, uvStride, fullW, fullH, chromaW, chromaH,
-                      static_cast<uint64_t>(ptsNanos))) {
-        return 0;
-    }
-    e->process(static_cast<uint64_t>(ptsNanos));
-
+/**
+ * Serialises the engine's current state into the caller's buffers.
+ *
+ * Shared by the YUV and RGBA entry points. Duplicating this would be a real
+ * hazard rather than a tidy-up: the two copies would have to agree byte for
+ * byte with what the Kotlin side reads at fixed indices, and nothing would catch
+ * it if one were edited.
+ */
+static void writeResults(JNIEnv* env, VisionEngine* e,
+                         jfloatArray outF, jintArray outI) {
     float f[kOutFloatCount];
     int i32[kOutIntCount];
     std::memset(f, 0, sizeof(f));
@@ -387,7 +356,86 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
         env->SetIntArrayRegion(outI, 0, kOutIntCount, i32);
     }
 
-    return th.valid ? 1 : 0;
+}
+
+/**
+ * Feeds one RGBA frame, which is the format a PRIVATE capture actually
+ * delivers.
+ *
+ * Several devices - this one reports a producer format of 0x1, PRIVATE, against
+ * a YUV_420_888 reader at 0x23 - refuse `acquireLatestImage()` outright, and they
+ * do it on every single frame, so a YUV-only capture never produces a frame at
+ * all. The engine is fed from a HardwareBuffer instead, and computes luma and the
+ * opponent signals in one pass from the interleaved bytes, which is both faster
+ * and more accurate than a YUV round trip.
+ */
+JNIEXPORT jint JNICALL
+Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcessRgba(
+        JNIEnv* env, jobject thiz, jlong handle,
+        jobject rgbaBuf, jint stride,
+        jint fullW, jint fullH, jlong ptsNanos,
+        jfloatArray outF, jintArray outI) {
+    VisionEngine* e = asEngine(handle);
+    if (e == nullptr) return -1;
+    if (rgbaBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
+
+    auto* src = static_cast<uint8_t*>(env->GetDirectBufferAddress(rgbaBuf));
+    jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
+    if (src == nullptr || stride <= 0) return 0;
+    const jlong needed = static_cast<jlong>(stride) * fullH;
+    if (cap > 0 && cap < needed) return 0;
+
+    if (!e->ingestRgba(src, stride, fullW, fullH, static_cast<uint64_t>(ptsNanos))) {
+        return 0;
+    }
+    e->process(static_cast<uint64_t>(ptsNanos));
+    writeResults(env, e, outF, outI);
+    return e->threat().valid ? 1 : 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
+        JNIEnv* env, jobject thiz, jlong handle,
+        jobject yBuf, jint yStride,
+        jobject uBuf, jobject vBuf, jint uvStride,
+        jint fullW, jint fullH, jint chromaW, jint chromaH,
+        jlong ptsNanos,
+        jfloatArray outF, jintArray outI) {
+    auto* e = asEngine(handle);
+    if (e == nullptr) return -1;
+    if (yBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
+
+    auto* y = static_cast<uint8_t*>(env->GetDirectBufferAddress(yBuf));
+    jlong yCap = env->GetDirectBufferCapacity(yBuf);
+    auto* u = uBuf ? static_cast<uint8_t*>(env->GetDirectBufferAddress(uBuf)) : nullptr;
+    auto* v = vBuf ? static_cast<uint8_t*>(env->GetDirectBufferAddress(vBuf)) : nullptr;
+
+    if (y == nullptr || yStride <= 0) return 0;
+    // The buffer must actually hold a full frame, otherwise reading it is UB.
+    const jlong needY = static_cast<jlong>(yStride) * static_cast<jlong>(fullH);
+    if (yCap > 0 && yCap < needY) return 0;
+
+    if (u != nullptr && v != nullptr && chromaW > 0 && chromaH > 0 && uvStride > 0) {
+        const jlong needUv = static_cast<jlong>(uvStride) * static_cast<jlong>(chromaH);
+        const jlong uCap = env->GetDirectBufferCapacity(uBuf);
+        const jlong vCap = env->GetDirectBufferCapacity(vBuf);
+        if ((uCap >= 0 && uCap < needUv) || (vCap >= 0 && vCap < needUv)) {
+            u = nullptr;
+            v = nullptr;
+        }
+    } else {
+        u = nullptr;
+        v = nullptr;
+    }
+
+    if (!e->ingestYuv(y, yStride, u, v, uvStride, fullW, fullH, chromaW, chromaH,
+                      static_cast<uint64_t>(ptsNanos))) {
+        return 0;
+    }
+    e->process(static_cast<uint64_t>(ptsNanos));
+
+    writeResults(env, e, outF, outI);
+    return e->threat().valid ? 1 : 0;
 }
 
 /**

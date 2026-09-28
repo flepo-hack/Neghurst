@@ -205,6 +205,12 @@ class ScreenThreatDetector(
      *        Those copies allocate, so they are kept off the default path.
      * @return null when native is unavailable or the frame was rejected.
      */
+    /**
+     * One analysed frame from a YUV capture.
+     *
+     * The cheaper path where it works: luma and chroma arrive already
+     * separated, so there is no interleaved copy to make.
+     */
     fun process(
         yPlane: ByteBuffer,
         yStride: Int,
@@ -219,31 +225,68 @@ class ScreenThreatDetector(
         screenWidth: Int,
         screenHeight: Int,
         collectDebug: Boolean = false
-    ): Analysis? {
-        if (!engine.isOpen) return null
-        if (frameWidth <= 0 || frameHeight <= 0) return null
-
-        val result = engine.process(
+    ): Analysis? = processFrame(
+        raw = engine.processResult(
             yPlane = yPlane, yStride = yStride,
             uPlane = uPlane, vPlane = vPlane, uvStride = uvStride,
             frameWidth = frameWidth, frameHeight = frameHeight,
             chromaWidth = chromaWidth, chromaHeight = chromaHeight,
             ptsNanos = ptsNanos
-        ) ?: return null
+        ) ?: return null,
+        screenWidth = screenWidth, screenHeight = screenHeight,
+        collectDebug = collectDebug, d = engine
+    )
 
+    /**
+     * One analysed RGBA frame, from a `PRIVATE` capture.
+     *
+     * Luma and the opponent signals are computed natively in one pass over the
+     * interleaved bytes, so this path skips the YUV plane copy entirely.
+     */
+    fun processRgba(
+        rgba: java.nio.ByteBuffer,
+        rowStride: Int,
+        frameWidth: Int,
+        frameHeight: Int,
+        ptsNanos: Long,
+        screenWidth: Int,
+        screenHeight: Int,
+        collectDebug: Boolean = false
+    ): Analysis? = processFrame(
+        raw = engine.processRgbaResult(
+            rgba = rgba, rowStride = rowStride,
+            frameWidth = frameWidth, frameHeight = frameHeight, ptsNanos = ptsNanos
+        ) ?: return null,
+        screenWidth = screenWidth, screenHeight = screenHeight,
+        collectDebug = collectDebug, d = engine
+    )
+
+    /**
+     * Assembles an [Analysis] from a fresh engine result.
+     *
+     * Shared by the YUV and RGBA capture paths so the threat geometry, the escape
+     * solve and the debug snapshots cannot drift between them. They are two ways
+     * of getting pixels in, not two analysers.
+     */
+    private fun processFrame(
+        raw: com.example.vision.nativebridge.VisionResult,
+        screenWidth: Int,
+        screenHeight: Int,
+        collectDebug: Boolean,
+        d: ScreenThreatDetector
+    ): Analysis? {
+        if (screenWidth <= 0 || screenHeight <= 0) return null
         if (collectDebug) {
-            debugBlobs = engine.readBlobs()
-            debugEnemies = engine.readEnemies()
-            debugTracks = engine.readTracks()
+            debugBlobs = d.debugTrackSnapshot()
+            debugEnemies = d.debugEnemySnapshot()
+            debugTracks = d.debugTrackSnapshot()
         }
-
         // The engine treats a hit as (playerRadius + projectileRadius). The
         // Kotlin solve must use the same figure or the two disagree about what
-        // counts as a collision, and the HUD will then report a threat the
-        // escape planner considers harmless.
+        // counts as a collision.
         val playerRadius =
             (tuning.playerRadiusNorm + tuning.projectileRadiusNorm) * screenWidth
-        val (playerX, playerY, detected) = resolvePlayerPosition(result, screenWidth, screenHeight)
+        val (playerX, playerY, detected) = d.resolvePlayerPosition(raw, screenWidth, screenHeight)
 
         // Every actionable projectile the engine is tracking, not just the one it
         // nominated. A burst is several pellets on a collision course and the
@@ -252,22 +295,22 @@ class ScreenThreatDetector(
         // engine's nominated threat is added if it is somehow missing, so the set
         // is never silently empty while a threat is live.
         val projectiles = buildList {
-            for (p in result.projectiles) {
+            for (p in raw.projectiles) {
                 add(
                     CollisionSolver.Projectile(
                         x = p.x, y = p.y, vx = p.vx, vy = p.vy,
-                        confidence = result.threatConfidence.coerceIn(0f, 1f)
+                        confidence = raw.threatConfidence.coerceIn(0f, 1f)
                     )
                 )
             }
-            if (result.threatValid && none { it.x == result.threatX && it.y == result.threatY }) {
+            if (raw.threatValid && none { it.x == raw.threatX && it.y == raw.threatY }) {
                 add(
                     CollisionSolver.Projectile(
-                        x = result.threatX,
-                        y = result.threatY,
-                        vx = result.threatVx,
-                        vy = result.threatVy,
-                        confidence = result.threatConfidence.coerceIn(0f, 1f)
+                        x = raw.threatX,
+                        y = raw.threatY,
+                        vx = raw.threatVx,
+                        vy = raw.threatVy,
+                        confidence = raw.threatConfidence.coerceIn(0f, 1f)
                     )
                 )
             }
@@ -309,7 +352,7 @@ class ScreenThreatDetector(
                 // not walk into one. They used to be dropped here, which meant
                 // the whole enemy-avoidance term was dead in the real app path and
                 // only ever exercised by tests.
-                enemies = result.enemyMarks.map { CollisionSolver.AvoidPoint(it.x, it.y) }
+                enemies = raw.enemyMarks.map { CollisionSolver.AvoidPoint(it.x, it.y) }
             )
         } else {
             CollisionSolver.Solution()
@@ -343,14 +386,14 @@ class ScreenThreatDetector(
             threat = threat,
             escape = escape,
             processMillis = engine.lastProcessMillis(),
-            blobCount = result.blobCount,
-            projectileCount = result.projectileCount,
-            ballCount = result.ballCount,
-            bouncerCount = result.bouncerCount,
+            blobCount = raw.blobCount,
+            projectileCount = raw.projectileCount,
+            ballCount = raw.ballCount,
+            bouncerCount = raw.bouncerCount,
             // The engine classifies enemies every frame; `debugEnemies` is only
             // copied out when the HUD is on, so counting the debug array here
             // would report zero most of the time.
-            enemyCount = result.enemyCount
+            enemyCount = raw.enemyCount
         )
     }
 
@@ -365,6 +408,7 @@ class ScreenThreatDetector(
      * are not calibrated, because a gesture from an uncalibrated stick position
      * would drag the wrong place on screen and, worse, look like it worked.
      */
+
     fun planDodge(
         analysis: Analysis?,
         screenWidth: Int,

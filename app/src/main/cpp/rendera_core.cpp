@@ -262,6 +262,63 @@ void VisionEngine::screenToGrid(float sx, float sy, float& gx, float& gy) const 
 // Stage 1: ingest + box downsample
 // ===========================================================================
 
+void VisionEngine::downsampleFromRgba(
+    const uint8_t* rgba, int stride, int fullW, int fullH) {
+    const int stepX = std::max(1, fullW / gridW_);
+    const int stepY = std::max(1, fullH / gridH_);
+
+    for (int gy = 0; gy < gridH_; ++gy) {
+        const int sy = std::min(fullH - 1, gy * stepY);
+        const uint8_t* row = rgba + static_cast<size_t>(sy) * stride;
+        const int outRow = gy * gridW_;
+        for (int gx = 0; gx < gridW_; ++gx) {
+            const int sx = std::min(fullW - 1, gx * stepX);
+            const uint8_t* px = row + static_cast<size_t>(sx) * 4;
+            const int r = px[0], g = px[1], b = px[2];
+
+            // Luma straight from the channels, no colour space round trip.
+            luma_[outRow + gx] = static_cast<uint8_t>(
+                clampf(0.299f * r + 0.587f * g + 0.114f * b, 0.0f, 255.0f));
+
+            // Opponent signals in the source space. These are exactly the
+            // quantities the detector wants, so computing them here is both
+            // cheaper and more accurate than converting to YUV, reconstructing
+            // RGB, and comparing channels again.
+            const float fr = r / 255.0f, fg = g / 255.0f, fb = b / 255.0f;
+            const float mx = std::max(fr, std::max(fg, fb));
+            const float mn = std::min(fr, std::min(fg, fb));
+            const float gOpp = fg - std::max(fr, fb);
+            const float rOpp = fr - std::max(fg, fb);
+
+            green_[outRow + gx] = static_cast<uint8_t>(
+                clampf(gOpp * kOpponentScale, 0.0f, 255.0f));
+            red_[outRow + gx] = static_cast<uint8_t>(
+                clampf(rOpp * kOpponentScale, 0.0f, 255.0f));
+            sat_[outRow + gx] = static_cast<uint8_t>(
+                clampf((mx - mn) * kOpponentScale, 0.0f, 255.0f));
+        }
+    }
+}
+
+bool VisionEngine::ingestRgba(
+    const uint8_t* rgba, int stride, int fullW, int fullH, uint64_t ptsNanos) {
+    if (rgba == nullptr || fullW <= 0 || fullH <= 0 || stride < fullW * 4) return false;
+
+    if (capW_ != fullW || capH_ != fullH) {
+        configureCapture(fullW, fullH, fullW / 2, fullH / 2, stride, stride / 2);
+        hasPrev_ = false;
+    }
+
+    std::memcpy(prevLuma_.data(), luma_.data(), static_cast<size_t>(totalCells_));
+    downsampleFromRgba(rgba, stride, fullW, fullH);
+    if (!hasPrev_) {
+        std::memcpy(prevLuma_.data(), luma_.data(), static_cast<size_t>(totalCells_));
+    }
+    hasPrev_ = true;
+    ingestPts_ = ptsNanos;
+    return true;
+}
+
 void VisionEngine::downsampleFromYuv(const uint8_t* y, int yStride,
                                      const uint8_t* u, const uint8_t* v, int uvStride,
                                      int fullW, int fullH, int chromaW, int chromaH) {

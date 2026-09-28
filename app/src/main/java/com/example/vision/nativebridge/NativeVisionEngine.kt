@@ -165,12 +165,60 @@ class NativeVisionEngine(
         return VisionResult(outFloats, outInts)
     }
 
+    /**
+     * Runs one YUV frame through the engine.
+     *
+     * @return null when native is unavailable or the frame was rejected.
+     */
+    fun processResult(
+        yPlane: ByteBuffer,
+        yStride: Int,
+        uPlane: ByteBuffer?,
+        vPlane: ByteBuffer?,
+        uvStride: Int,
+        frameWidth: Int,
+        frameHeight: Int,
+        chromaWidth: Int,
+        chromaHeight: Int,
+        ptsNanos: Long
+    ): VisionResult? {
+        if (!isOpen) return null
+        val rc = nativeProcess(
+            handle, yPlane, yStride, uPlane, vPlane, uvStride,
+            frameWidth, frameHeight, chromaWidth, chromaHeight, ptsNanos,
+            outFloats, outInts
+        )
+        if (rc < 0) return null
+        return VisionResult(outFloats, outInts)
+    }
+
+    /**
+     * Runs one RGBA frame through the engine.
+     *
+     * @return null when native is unavailable or the frame was rejected.
+     */
+    fun processRgbaResult(
+        rgba: ByteBuffer,
+        rowStride: Int,
+        frameWidth: Int,
+        frameHeight: Int,
+        ptsNanos: Long
+    ): VisionResult? {
+        if (!isOpen) return null
+        val rc = nativeProcessRgba(
+            rgba, rowStride, frameWidth, frameHeight, ptsNanos, outFloats, outInts
+        )
+        if (rc < 0) return null
+        return VisionResult(outFloats, outInts)
+    }
+
     // -----------------------------------------------------------------------
     // Debug readouts. These allocate on the JNI side and are only called when
     // the debug HUD is actually visible, so they stay off the hot path.
     // -----------------------------------------------------------------------
 
     /** Motion blobs. Each entry is (screenX, screenY, area, meanStrength). */
+    /** Ignored; the JNI buffer sizes come from the constant below. */
     fun readBlobs(): FloatArray {
         if (!isOpen) return FloatArray(0)
         val n = nativeCopyBlobs(handle, blobBuffer, MAX_BLOBS)
@@ -219,6 +267,24 @@ class NativeVisionEngine(
     private external fun nativeSetScreenSize(handle: Long, screenWidth: Int, screenHeight: Int)
     private external fun nativeConfigure(handle: Long, config: FloatArray)
     private external fun nativeSetMask(handle: Long, mask: FloatArray?)
+    /**
+     * One RGBA frame from a `PRIVATE` capture.
+     *
+     * The path several devices require: a virtual display feeding a
+     * `YUV_420_888` reader is refused by them with "the producer output buffer
+     * format 0x1 doesn't match the ImageReader's configured buffer format 0x23",
+     * on every frame.
+     */
+    private external fun nativeProcessRgba(
+        rgbaBuf: ByteBuffer,
+        stride: Int,
+        fullW: Int,
+        fullH: Int,
+        ptsNanos: Long,
+        outF: FloatArray,
+        outI: IntArray
+    ): Int
+
     private external fun nativeProcess(
         handle: Long,
         yPlane: ByteBuffer, yStride: Int,
