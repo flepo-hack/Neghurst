@@ -29,6 +29,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.ImageView
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -2496,6 +2497,31 @@ class RenderaOverlayService : Service() {
     }
 
     /** Reopens the menu carrying a specific reason, so a failure is readable. */
+    /**
+     * Runs a menu action, and never lets one take the app down.
+     *
+     * A menu button that throws leaves the panel half removed and the service in
+     * a state nobody can read. Caught, logged, and recorded in the event log so
+     * the reason survives the session.
+     */
+    private fun runClick(action: () -> Unit) {
+        try {
+            action()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Menu action failed", t)
+            runCatching { events.error("menu", t.message ?: "threw", t) }
+            mainHandler.post { toast("That action failed: ${t.message ?: t.javaClass.simpleName}") }
+        }
+    }
+
+    private fun closeMenu() {
+        menuView?.let { runCatching { windowManager.removeView(it) } }
+        menuView = null
+        pushMaskRegions()
+    }
+
+    private fun removeMenu() = closeMenu()
+
     private fun openMenuWithStatus(reason: String) {
         pendingMenuStatus = reason
         openMenu(0, 0)
