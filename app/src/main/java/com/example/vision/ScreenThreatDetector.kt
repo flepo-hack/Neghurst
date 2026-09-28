@@ -225,17 +225,16 @@ class ScreenThreatDetector(
         screenWidth: Int,
         screenHeight: Int,
         collectDebug: Boolean = false
-    ): Analysis? = processFrame(
-        raw = engine.processResult(
+    ): Analysis? {
+        val raw = engine.processResult(
             yPlane = yPlane, yStride = yStride,
             uPlane = uPlane, vPlane = vPlane, uvStride = uvStride,
             frameWidth = frameWidth, frameHeight = frameHeight,
             chromaWidth = chromaWidth, chromaHeight = chromaHeight,
             ptsNanos = ptsNanos
-        ) ?: return null,
-        screenWidth = screenWidth, screenHeight = screenHeight,
-        collectDebug = collectDebug, d = engine
-    )
+        ) ?: return null
+        return processFrame(raw, screenWidth, screenHeight, collectDebug)
+    }
 
     /**
      * One analysed RGBA frame, from a `PRIVATE` capture.
@@ -252,14 +251,13 @@ class ScreenThreatDetector(
         screenWidth: Int,
         screenHeight: Int,
         collectDebug: Boolean = false
-    ): Analysis? = processFrame(
-        raw = engine.processRgbaResult(
+    ): Analysis? {
+        val raw = engine.processRgbaResult(
             rgba = rgba, rowStride = rowStride,
             frameWidth = frameWidth, frameHeight = frameHeight, ptsNanos = ptsNanos
-        ) ?: return null,
-        screenWidth = screenWidth, screenHeight = screenHeight,
-        collectDebug = collectDebug, d = engine
-    )
+        ) ?: return null
+        return processFrame(raw, screenWidth, screenHeight, collectDebug)
+    }
 
     /**
      * Assembles an [Analysis] from a fresh engine result.
@@ -272,21 +270,19 @@ class ScreenThreatDetector(
         raw: com.example.vision.nativebridge.VisionResult,
         screenWidth: Int,
         screenHeight: Int,
-        collectDebug: Boolean,
-        d: ScreenThreatDetector
+        collectDebug: Boolean
     ): Analysis? {
         if (screenWidth <= 0 || screenHeight <= 0) return null
         if (collectDebug) {
-            debugBlobs = d.debugTrackSnapshot()
-            debugEnemies = d.debugEnemySnapshot()
-            debugTracks = d.debugTrackSnapshot()
+            debugBlobs = debugTrackSnapshot()
+            debugEnemies = debugEnemySnapshot()
         }
         // The engine treats a hit as (playerRadius + projectileRadius). The
         // Kotlin solve must use the same figure or the two disagree about what
         // counts as a collision.
         val playerRadius =
             (tuning.playerRadiusNorm + tuning.projectileRadiusNorm) * screenWidth
-        val (playerX, playerY, detected) = d.resolvePlayerPosition(raw, screenWidth, screenHeight)
+        val (playerX, playerY, detected) = resolvePlayerPosition(raw, screenWidth, screenHeight)
 
         // Every actionable projectile the engine is tracking, not just the one it
         // nominated. A burst is several pellets on a collision course and the

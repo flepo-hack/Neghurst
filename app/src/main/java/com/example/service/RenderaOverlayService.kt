@@ -741,8 +741,8 @@ class RenderaOverlayService : Service() {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
             return null
         }
-        val format = if (captureMode == CaptureMode.RGBA) {
-            android.graphics.ImageFormat.RGBA_8888
+        val format = if (captureMode == CaptureMode.PRIVATE) {
+            android.graphics.ImageFormat.PRIVATE
         } else {
             android.graphics.ImageFormat.YUV_420_888
         }
@@ -761,7 +761,7 @@ class RenderaOverlayService : Service() {
     }
 
     /** How the device chose to deliver frames. */
-    private enum class CaptureMode { YUV, RGBA }
+    private enum class CaptureMode { YUV, PRIVATE }
 
     @Volatile
     private var captureMode = CaptureMode.YUV
@@ -783,8 +783,8 @@ class RenderaOverlayService : Service() {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            val ok = if (captureMode == CaptureMode.RGBA) {
-                frameRing.publishRgba(image)
+            val ok = if (captureMode == CaptureMode.PRIVATE) {
+                frameRing.publishPrivate(image)
             } else {
                 frameRing.publish(image)
             }
@@ -792,7 +792,7 @@ class RenderaOverlayService : Service() {
         } catch (t: Throwable) {
             val msg = t.message ?: ""
             if (captureMode == CaptureMode.YUV && msg.contains("buffer format")) {
-                switchToRgbaCapture()
+                switchToPrivateCapture()
             } else {
                 runCatching { events.error("capture", msg.take(120), t) }
             }
@@ -816,10 +816,10 @@ class RenderaOverlayService : Service() {
      * `PRIVATE` is deliberately not used: it exposes its pixels only through
      * `android.hardware.HardwareBuffer`, which is not in the public SDK.
      */
-    private fun switchToRgbaCapture() {
+    private fun switchToPrivateCapture() {
         Log.w(TAG, "device refuses YUV_420_888; switching to RGBA_8888 capture")
         runCatching { events.error("capture", "YUV_420_888 refused, using RGBA_8888") }
-        captureMode = CaptureMode.RGBA
+        captureMode = CaptureMode.PRIVATE
         val old = imageReader
         imageReader = createImageReader()
         val replacement = imageReader
@@ -1070,7 +1070,7 @@ class RenderaOverlayService : Service() {
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
-        val mode = if (captureMode == CaptureMode.RGBA) "RGBA_8888" else "YUV_420_888"
+        val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV_420_888"
         val suppressed = shouldSuppressDodge()
         val anchorsStale = anchors.calibrated &&
             anchors.calibratedForWidth != displayWidth
@@ -1409,7 +1409,7 @@ class RenderaOverlayService : Service() {
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
             while (isActive) {
-                val rgbaMode = captureMode == CaptureMode.RGBA
+                val privateMode = captureMode == CaptureMode.PRIVATE
                 val frame = frameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)
@@ -1445,7 +1445,7 @@ class RenderaOverlayService : Service() {
                         val analysis = synchronized(detectorLock) {
                             if (frame == null) {
                                 null
-                            } else if (rgbaMode) {
+                            } else if (privateMode) {
                                 val f = frame
                                 // The RGBA plane only exists on an RGBA_8888
                                 // capture, so a null here is a mode mismatch and
@@ -1770,7 +1770,7 @@ class RenderaOverlayService : Service() {
         // Armed but seeing nothing is a distinct state from armed and working,
         // and reporting both as "Armed" is why arming appeared to do nothing.
         if (framesAnalysed == 0L) {
-            val mode = if (captureMode == CaptureMode.RGBA) "RGBA" else "YUV"
+            val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"
             return "No frames via $mode. ${lastFrameAge()}"
         }
         if (latestAnalysis?.playerDetected != true) {
@@ -2548,7 +2548,7 @@ class RenderaOverlayService : Service() {
             // This button previously looked broken because every failure looked
             // identical from the menu.
             val why = "no frame analysed yet " +
-                "(mode ${if (captureMode == CaptureMode.RGBA) "RGBA" else "YUV"}, " +
+                "(mode ${if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"}, " +
                 "got ${framesReceived}, rejected ${framesRejected}, " +
                 "analysed ${framesAnalysed})"
             mainHandler.post {

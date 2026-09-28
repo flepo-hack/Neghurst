@@ -240,34 +240,83 @@ class YuvFrameRing(private val poolSize: Int = 3) {
      * rather than assumed, because "interleaved" does not promise "tightly
      * packed".
      */
-    fun publishRgba(image: Image): Boolean {
+    /**
+     * Copies a `PRIVATE` image into the pool.
+     *
+     * A `PRIVATE` image has no planes: its pixels are only reachable through the
+     * hardware buffer the image wraps, which must be *locked* before they are
+     * addressable. The lock is held across nothing but the copy, because holding
+     * it stalls the compositor and that is what makes a capture stutter the game.
+     *
+     * The buffer type is never named: it is reached through the image and used
+     * through `let`, so there is no import of a possibly non-public type and no
+     * annotation that could fail to resolve. Every member used here -
+     * `lock`, `unlock`, `rowStride` - is part of the public surface of that
+     * buffer, reached through inference.
+     *
+     * `RGBA_8888` is deliberately not used as the capture format even though it
+     * looks like the obvious choice: its value is 1, which is also
+     * `ImageFormat.PRIVATE`, so an `ImageReader` created with it is a PRIVATE
+     * reader and exposes no planes at all.
+     */
+    fun publishPrivate(image: Image): Boolean {
         synchronized(lock) {
             if (image.width != frameWidth || image.height != frameHeight || rgbaSlots.isEmpty()) {
                 rejectedFrames++
                 return false
             }
-            val planes = image.planes
-            if (planes.isEmpty()) {
+            val idx = nextFreeSlot()
+            if (idx < 0) {
                 rejectedFrames++
                 return false
             }
-            val idx = nextFreeSlot() ?: run { rejectedFrames++; return false }
             val dst = rgbaSlots[idx]
             if (dst == null) {
                 rejectedFrames++
                 return false
             }
-            val ok = try {
-                copyPlane(planes[0], dst, rgbaStride, frameWidth, frameHeight, 4)
+            val rowBytes = frameWidth * 4
+            var copied = false
+            try {
+                image.hardwareBuffer?.let { buffer ->
+                    if (buffer.rowStride < rowBytes) {
+                        Log.w(
+                            "RenderaRing",
+                            "rowStride ${buffer.rowStride} below ${rowBytes} needed"
+                        )
+                        return false
+                    }
+                    val src = buffer.lock()
+                    try {
+                        dst.clear()
+                        val limit = minOf(src.limit(), src.capacity())
+                        for (y in 0 until frameHeight) {
+                            val from = y * buffer.rowStride
+                            val to = y * rgbaStride
+                            if (from + rowBytes > limit) break
+                            val srcRow = src.duplicate()
+                            srcRow.position(from)
+                            srcRow.limit(from + rowBytes)
+                            val dstRow = dst.duplicate()
+                            dstRow.position(to)
+                            dstRow.limit(to + rowBytes)
+                            dstRow.put(srcRow)
+                        }
+                    } finally {
+                        // Unlock before anything else can throw, or the buffer
+                        // stays locked and the compositor stalls.
+                        runCatching { buffer.unlock() }
+                            .onFailure { Log.w("RenderaRing", "unlock failed", it) }
+                    }
+                    dst.clear()
+                    copied = true
+                } ?: run { rejectedFrames++; return false }
             } catch (t: Throwable) {
-                Log.w("RenderaRing", "RGBA copy failed", t)
-                false
-            }
-            if (!ok) {
+                Log.w("RenderaRing", "PRIVATE copy failed", t)
                 rejectedFrames++
                 return false
             }
-            dst.clear()
+            if (!copied) return false
             receivedRgba++
             if (publishedSlot >= 0 && publishedSlot != idx) droppedFrames++
             publishedSlot = idx
