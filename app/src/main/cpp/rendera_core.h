@@ -396,6 +396,19 @@ public:
                    const uint8_t* uPlane, const uint8_t* vPlane, int uvStride,
                    int fullW, int fullH, int chromaW, int chromaH,
                    uint64_t ptsNanos);
+
+    /**
+     * Feeds a frame as packed RGBA, which is what a PRIVATE-format capture
+     * actually delivers.
+     *
+     * Preferred over the YUV path when available, and not only because it is the
+     * format some devices insist on: converting to YUV first and back is a lossy
+     * round trip, whereas the opponent signals wanted by the player detector are
+     * simply channel comparisons in the source space. Luma and the two opponent
+     * scores are computed in one pass from the interleaved bytes.
+     */
+    bool ingestRgba(const uint8_t* rgba, int stride,
+                    int fullW, int fullH, uint64_t ptsNanos);
     // Run the full pipeline for the ingested frame. Call once per ingest.
     void process(uint64_t ptsNanos);
 
@@ -442,18 +455,6 @@ public:
 
 private:
     // --- stages ---
-    /**
-     * Feeds a frame as packed RGBA, which is what a PRIVATE-format capture
-     * actually delivers.
-     *
-     * Preferred over the YUV path when available, and not only because it is the
-     * format some devices insist on: converting to YUV first and back is a lossy
-     * round trip, whereas the opponent signals wanted by the player detector are
-     * simply channel comparisons in the source space. Luma and the two opponent
-     * scores are computed in one pass from the interleaved bytes.
-     */
-    bool ingestRgba(const uint8_t* rgba, int stride,
-                    int fullW, int fullH, uint64_t ptsNanos);
     void downsampleFromRgba(const uint8_t* rgba, int stride, int fullW, int fullH);
 
     void downsampleFromYuv(const uint8_t* y, int yStride,

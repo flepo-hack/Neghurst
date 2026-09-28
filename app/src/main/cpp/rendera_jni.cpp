@@ -228,7 +228,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeSetMask(
  * byte with what the Kotlin side reads at fixed indices, and nothing would catch
  * it if one were edited.
  */
-static void writeResults(JNIEnv* env, VisionEngine* e,
+static void writeResults(JNIEnv* env, rendera::VisionEngine* e,
                          jfloatArray outF, jintArray outI) {
     float f[kOutFloatCount];
     int i32[kOutIntCount];
@@ -375,7 +375,7 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcessRgba(
         jobject rgbaBuf, jint stride,
         jint fullW, jint fullH, jlong ptsNanos,
         jfloatArray outF, jintArray outI) {
-    VisionEngine* e = asEngine(handle);
+    rendera::VisionEngine* e = asEngine(handle);
     if (e == nullptr) return -1;
     if (rgbaBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
 
