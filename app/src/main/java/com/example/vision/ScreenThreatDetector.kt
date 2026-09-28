@@ -374,7 +374,7 @@ class ScreenThreatDetector(
         }
 
         return Analysis(
-            raw = result,
+            raw = raw,
             playerX = playerX,
             playerY = playerY,
             playerDetected = detected,
