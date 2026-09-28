@@ -1449,9 +1449,16 @@ class RenderaOverlayService : Service() {
                                 null
                             } else if (rgbaMode) {
                                 val f = frame
+                                // The RGBA plane only exists on an RGBA_8888
+                                // capture, so a null here is a mode mismatch and
+                                // not something to dereference blindly.
+                                val rgba = f.rgba
+                                if (rgba == null) {
+                                    null
+                                } else
                                 d.processRgba(
-                                    rgba = f.rgba,
-                                    rowStride = f.rowStride,
+                                    rgba = rgba,
+                                    rowStride = f.rgbaStride,
                                     frameWidth = f.width,
                                     frameHeight = f.height,
                                     ptsNanos = System.nanoTime(),

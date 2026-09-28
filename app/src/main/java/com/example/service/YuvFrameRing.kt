@@ -1,6 +1,7 @@
 package com.example.service
 
 import android.media.Image
+import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -43,6 +44,17 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     private var slots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
     private var uSlots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
     private var vSlots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
+
+    /**
+     * Interleaved RGBA, for the `RGBA_8888` capture path.
+     *
+     * `RGBA_8888` rather than `PRIVATE`: a PRIVATE image exposes its pixels only
+     * through a hardware buffer type that is not in the public SDK, whereas
+     * `RGBA_8888` is a documented ImageReader format whose single interleaved
+     * plane is readable with the same copy the YUV path already uses.
+     */
+    private var rgbaSlots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
+    private var rgbaStride = 0
 
     private var frameWidth = 0
     private var frameHeight = 0
@@ -93,9 +105,11 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             chromaHeight = (height + 1) / 2
             uvStride = (chromaWidth + 15) and 15.inv()
 
+            rgbaStride = ((width * 4 + 63) / 64) * 64
             slots = Array(poolSize) { allocate(yStride * height) }
             uSlots = Array(poolSize) { allocate(uvStride * chromaHeight) }
             vSlots = Array(poolSize) { allocate(uvStride * chromaHeight) }
+            rgbaSlots = Array(poolSize) { allocate(rgbaStride * height) }
 
             borrowedSlot = -1
             publishedSlot = -1
@@ -187,6 +201,8 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             v = v,
             yStride = yStride,
             uvStride = uvStride,
+            rgba = rgbaSlots[idx],
+            rgbaStride = rgbaStride,
             width = frameWidth,
             height = frameHeight,
             chromaWidth = chromaWidth,
@@ -214,32 +230,47 @@ class YuvFrameRing(private val poolSize: Int = 3) {
      * stride of four. `pixelStride` is honoured rather than assumed, because the
      * format says "interleaved" but not always "tightly packed".
      */
+    /**
+     * Copies an `RGBA_8888` image into the pool.
+     *
+     * One interleaved plane, so the whole frame is a row-wise copy with a pixel
+     * stride of four. The plane's own `rowStride` and `pixelStride` are honoured
+     * rather than assumed, because "interleaved" does not promise "tightly
+     * packed".
+     */
     fun publishRgba(image: Image): Boolean {
-        if (image.width != width || image.height != height) {
-            rejectedFrames++
-            return false
-        }
-        val planes = image.planes
-        if (planes.isEmpty()) {
-            rejectedFrames++
-            return false
-        }
-        val slot = acquire() ?: run { rejectedFrames++; return false }
-        return try {
-            val ok = copyPlane(planes[0], slot.rgba, slot.rgbaStride, width, height, 4)
-            if (!ok) {
+        synchronized(lock) {
+            if (image.width != frameWidth || image.height != frameHeight || rgbaSlots.isEmpty()) {
                 rejectedFrames++
-                recycle(slot)
                 return false
             }
-            slot.rgba.clear()
+            val planes = image.planes
+            if (planes.isEmpty()) {
+                rejectedFrames++
+                return false
+            }
+            val idx = nextFreeSlot() ?: run { rejectedFrames++; return false }
+            val dst = rgbaSlots[idx]
+            if (dst == null) {
+                rejectedFrames++
+                return false
+            }
+            val ok = try {
+                copyPlane(planes[0], dst, rgbaStride, frameWidth, frameHeight, 4)
+            } catch (t: Throwable) {
+                Log.w("RenderaRing", "RGBA copy failed", t)
+                false
+            }
+            if (!ok) {
+                rejectedFrames++
+                return false
+            }
+            dst.clear()
             receivedRgba++
-            publish(slot)
-            true
-        } catch (t: Throwable) {
-            rejectedFrames++
-            recycle(slot)
-            false
+            if (publishedSlot >= 0 && publishedSlot != idx) droppedFrames++
+            publishedSlot = idx
+            publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
+            return true
         }
     }
 
@@ -303,6 +334,7 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             slots = arrayOfNulls(poolSize)
             uSlots = arrayOfNulls(poolSize)
             vSlots = arrayOfNulls(poolSize)
+            rgbaSlots = arrayOfNulls(poolSize)
             borrowedSlot = -1
             publishedSlot = -1
             publishedId = NO_FRAME
@@ -319,6 +351,9 @@ class YuvFrameRing(private val poolSize: Int = 3) {
         val v: ByteBuffer,
         val yStride: Int,
         val uvStride: Int,
+        /** Interleaved RGBA, non null only for an `RGBA_8888` capture. */
+        val rgba: ByteBuffer? = null,
+        val rgbaStride: Int = 0,
         val width: Int,
         val height: Int,
         val chromaWidth: Int,
