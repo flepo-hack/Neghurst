@@ -746,6 +746,7 @@ class RenderaOverlayService : Service() {
         } else {
             android.graphics.ImageFormat.YUV_420_888
         }
+        requestedFormat = format
         return try {
             val reader = ImageReader.newInstance(captureWidth, captureHeight, format, 2)
             reader.setOnImageAvailableListener(
@@ -765,6 +766,10 @@ class RenderaOverlayService : Service() {
 
     @Volatile
     private var captureMode = CaptureMode.YUV
+
+    /** The exact format value handed to the ImageReader, for the log. */
+    @Volatile
+    private var requestedFormat = 0
 
     /**
      * One frame from the reader.
@@ -792,7 +797,7 @@ class RenderaOverlayService : Service() {
         } catch (t: Throwable) {
             val msg = t.message ?: ""
             if (captureMode == CaptureMode.YUV && msg.contains("buffer format")) {
-                switchToPrivateCapture()
+                reportFormatRefusal(requestedFormat, msg)
             } else {
                 runCatching { events.error("capture", msg.take(120), t) }
             }
@@ -816,27 +821,35 @@ class RenderaOverlayService : Service() {
      * `PRIVATE` is deliberately not used: it exposes its pixels only through
      * `android.hardware.HardwareBuffer`, which is not in the public SDK.
      */
-    private fun switchToPrivateCapture() {
-        Log.w(TAG, "device refuses YUV_420_888; switching to RGBA_8888 capture")
-        runCatching { events.error("capture", "YUV_420_888 refused, using RGBA_8888") }
-        captureMode = CaptureMode.PRIVATE
-        val old = imageReader
-        imageReader = createImageReader()
-        val replacement = imageReader
-        if (replacement == null) {
-            startFailure = "This device refused both YUV and RGBA capture."
-            Log.e(TAG, startFailure!!)
-            publishStatus(capturing = false, armed = false)
-            return
-        }
-        runCatching {
-            virtualDisplay?.setSurface(replacement.surface)
-            old?.close()
-        }.onFailure { Log.e(TAG, "could not repoint the virtual display", it) }
-        startFailure = null
-        publishStatus(capturing = true)
-        Log.i(TAG, "RGBA_8888 capture active at ${captureWidth}x$captureHeight")
+    /**
+     * Records a format refusal once, naming the exact value requested.
+     *
+     * The device reported "the producer output buffer format 0x1 doesn't match
+     * the ImageReader's configured buffer format 0x23" more than 1400 times a
+     * second. 0x23 is not `ImageFormat.YUV_420_888`, which is 0x13, so the value
+     * that was actually handed to the reader is now recorded and reported: one
+     * line that says what was asked for and what came back, instead of a flood
+     * that buries everything else.
+     *
+     * A PRIVATE capture is the only other format a display surface offers, and it
+     * cannot be read with the public SDK - its pixels are reachable only through
+     * a hardware buffer type the SDK does not expose. So a refusal is reported
+     * rather than retried into a path that cannot work.
+     */
+    private fun reportFormatRefusal(requested: Int, detail: String) {
+        if (formatRefused) return
+        formatRefused = true
+        val msg = "device refused 0x${Integer.toHexString(requested)}: $detail"
+        Log.e(TAG, msg)
+        runCatching { events.error("capture", msg) }
+        startFailure = "This device refused the capture format."
+        publishStatus(capturing = false, armed = false)
+        mainHandler.post { toast("Screen capture format refused on this device") }
     }
+
+    /** One refusal per session, so the log cannot flood again. */
+    @Volatile
+    private var formatRefused = false
 
     private fun yuvRowStride(): Int = ((captureWidth + 15) / 16) * 16
 
@@ -1070,7 +1083,7 @@ class RenderaOverlayService : Service() {
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
-        val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV_420_888"
+        val mode = "0x" + Integer.toHexString(requestedFormat)
         val suppressed = shouldSuppressDodge()
         val anchorsStale = anchors.calibrated &&
             anchors.calibratedForWidth != displayWidth

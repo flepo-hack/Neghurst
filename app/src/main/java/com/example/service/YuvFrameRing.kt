@@ -259,70 +259,22 @@ class YuvFrameRing(private val poolSize: Int = 3) {
      * `ImageFormat.PRIVATE`, so an `ImageReader` created with it is a PRIVATE
      * reader and exposes no planes at all.
      */
+    /**
+     * A `PRIVATE` image has no planes and its pixels are only reachable through
+     * a hardware buffer type that the public SDK does not expose, so this path
+     * cannot be implemented and the caller is told so rather than being left with
+     * a reader that silently produces nothing.
+     *
+     * Recorded because it has already cost several build cycles to discover.
+     */
     fun publishPrivate(image: Image): Boolean {
-        synchronized(lock) {
-            if (image.width != frameWidth || image.height != frameHeight || rgbaSlots.isEmpty()) {
-                rejectedFrames++
-                return false
-            }
-            val idx = nextFreeSlot()
-            if (idx < 0) {
-                rejectedFrames++
-                return false
-            }
-            val dst = rgbaSlots[idx]
-            if (dst == null) {
-                rejectedFrames++
-                return false
-            }
-            val rowBytes = frameWidth * 4
-            var copied = false
-            try {
-                image.hardwareBuffer?.let { buffer ->
-                    if (buffer.rowStride < rowBytes) {
-                        Log.w(
-                            "RenderaRing",
-                            "rowStride ${buffer.rowStride} below ${rowBytes} needed"
-                        )
-                        return false
-                    }
-                    val src = buffer.lock()
-                    try {
-                        dst.clear()
-                        val limit = minOf(src.limit(), src.capacity())
-                        for (y in 0 until frameHeight) {
-                            val from = y * buffer.rowStride
-                            val to = y * rgbaStride
-                            if (from + rowBytes > limit) break
-                            val srcRow = src.duplicate()
-                            srcRow.position(from)
-                            srcRow.limit(from + rowBytes)
-                            val dstRow = dst.duplicate()
-                            dstRow.position(to)
-                            dstRow.limit(to + rowBytes)
-                            dstRow.put(srcRow)
-                        }
-                    } finally {
-                        // Unlock before anything else can throw, or the buffer
-                        // stays locked and the compositor stalls.
-                        runCatching { buffer.unlock() }
-                            .onFailure { Log.w("RenderaRing", "unlock failed", it) }
-                    }
-                    dst.clear()
-                    copied = true
-                } ?: run { rejectedFrames++; return false }
-            } catch (t: Throwable) {
-                Log.w("RenderaRing", "PRIVATE copy failed", t)
-                rejectedFrames++
-                return false
-            }
-            if (!copied) return false
-            receivedRgba++
-            if (publishedSlot >= 0 && publishedSlot != idx) droppedFrames++
-            publishedSlot = idx
-            publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
-            return true
-        }
+        rejectedFrames++
+        Log.w(
+            "RenderaRing",
+            "PRIVATE capture (format 0x1) has no public pixel accessor; " +
+                "YUV_420_888 is the only readable format on this device path"
+        )
+        return false
     }
 
     private fun copyPlane(
