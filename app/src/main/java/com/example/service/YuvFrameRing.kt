@@ -77,6 +77,8 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     // would not see the paired write, so these are volatile.
     @Volatile private var consumedFrames = 0L
     @Volatile private var droppedFrames = 0L
+    @Volatile private var receivedRgba = 0L
+    @Volatile private var rejectedFrames = 0L
     @Volatile private var frameWidthVolatile = 0
     @Volatile private var frameHeightVolatile = 0
 

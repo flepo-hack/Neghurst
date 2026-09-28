@@ -840,8 +840,6 @@ class RenderaOverlayService : Service() {
 
     private fun yuvRowStride(): Int = ((captureWidth + 15) / 16) * 16
 
-    private fun yuvFormatIsYuv(): Int = android.graphics.PixelFormat.YUV_420_888
-
     /** One HandlerThread for the plane copies, created on first use. */
     private fun captureHandler(): Handler {
         val existing = captureThread
@@ -1411,8 +1409,8 @@ class RenderaOverlayService : Service() {
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
             while (isActive) {
-                val privateMode = captureMode == CaptureMode.RGBA
-                val frame = if (privateMode) frameRing.take() else frameRing.take()
+                val rgbaMode = captureMode == CaptureMode.RGBA
+                val frame = frameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)
                     continue
@@ -2178,7 +2176,6 @@ class RenderaOverlayService : Service() {
             // A visible scrollbar is the only way a user can tell the panel
             // scrolls rather than being stuck.
             isVerticalScrollBarEnabled = true
-            isVerticalScrollBarAlwaysDrawn = true
             scrollBarStyle = android.view.View.SCROLLBARS_INSIDE_OVERLAY
             addView(column)
         }
