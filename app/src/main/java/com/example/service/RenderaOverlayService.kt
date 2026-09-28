@@ -1953,7 +1953,7 @@ class RenderaOverlayService : Service() {
             orientation = LinearLayout.VERTICAL
             background = panelBackground()
             elevation = dp(12f)
-            setPadding(0, 0, 0, dp(6f))
+            setPadding(0, 0, 0, dp(6f).roundToInt())
         }
         // A heading, so the panel is obviously a menu and not a stray rectangle.
         root.addView(TextView(this).apply {

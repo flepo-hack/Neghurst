@@ -93,6 +93,57 @@ def kotlin_files() -> list[pathlib.Path]:
 
 def main() -> int:
     findings: list[str] = []
+
+    def balanced_arg(text: str, open_paren: int) -> str:
+        """The text between a call's open paren and its matching close paren.
+
+        A regex cannot do this: `dp(6f.roundToInt())` has nested parentheses, so
+        a `[^()]*` pattern cannot see inside it, and a comma split of
+        `setPadding(0, 0, 0, dp(6f))` trips over dp's own comma-less but
+        parenthesised argument. Both mistakes produced silent misses before.
+        """
+        depth, cur = 0, []
+        i = open_paren
+        while i < len(text):
+            c = text[i]
+            if c == "(":
+                depth += 1
+                if depth == 1:
+                    i += 1
+                    continue
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return "".join(cur)
+            cur.append(c)
+            i += 1
+        return "".join(cur)
+
+    def top_level_args(text: str, open_paren: int) -> list[str]:
+        depth, cur, out = 0, [], []
+        i = open_paren
+        while i < len(text):
+            c = text[i]
+            if c == "(":
+                depth += 1
+                if depth == 1:
+                    i += 1
+                    continue
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    if "".join(cur).strip():
+                        out.append("".join(cur).strip())
+                    return out
+            elif c == "," and depth == 1:
+                out.append("".join(cur).strip())
+                cur = []
+                i += 1
+                continue
+            cur.append(c)
+            i += 1
+        return out
+
     files = kotlin_files()
     if not files:
         print(f"::error::no Kotlin sources found under {', '.join(ROOTS)}")
@@ -244,6 +295,36 @@ def main() -> int:
                     f"{tpath}: looks up `{name}` on the wire, but it is not in "
                     f"VisionTuning.WIRE_ORDER, so wireIndexOf returns -1 and the "
                     f"assertion compares against garbage"
+                )
+
+    # 12. Two numeric type traps around the `dp()` helper, both of which had
+    #     already cost a CI round trip in this project.
+    #
+    #       `setPadding`/`setStroke` take Int and are often given `dp(...)`, which
+    #       returns Float.  -> "actual type is Float, but Int was expected"
+    #
+    #       `dp()` takes Float, so `dp(6f.roundToInt())` is an Int into Float.
+    #       A regex normalisation produced exactly that: `dp(6f)` became
+    #       `dp(6f.roundToInt())` and a second pass added another around it.
+    #
+    #     Both need the paren-balanced walk; a `[^()]*` pattern sees neither.
+    for path in files:
+        src = path.read_text()
+        for m in re.finditer(r"\b(setPadding|setStroke)\s*\(", src):
+            for arg in top_level_args(src, m.end() - 1):
+                if re.fullmatch(r"dp\s*\([\d.]+f\)", arg):
+                    line_no = src[: m.start()].count("\n") + 1
+                    findings.append(
+                        f"{path}:{line_no}: `{m.group(1)}` takes Int and is given "
+                        f"`{arg}`, but dp() returns Float. Add .roundToInt()."
+                    )
+        for m in re.finditer(r"\bdp\s*\(", src):
+            arg = balanced_arg(src, m.end() - 1)
+            if "roundToInt" in arg or ".toInt()" in arg:
+                line_no = src[: m.start()].count("\n") + 1
+                findings.append(
+                    f"{path}:{line_no}: `dp({arg})` passes an Int to dp(), which "
+                    f"takes Float. Narrow at the call site: `dp(6f).roundToInt()`."
                 )
 
     if findings:
