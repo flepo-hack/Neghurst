@@ -203,17 +203,13 @@ class RenderaOverlayService : Service() {
     private var imageReader: ImageReader? = null
     private var captureThread: android.os.HandlerThread? = null
     private var virtualDisplay: VirtualDisplay? = null
-    /** YUV_420_888 capture, where the device cooperates. */
-    private val yuvFrameRing = YuvFrameRing(poolSize = 3)
-
     /**
-     * `PRIVATE` capture, for the devices that refuse YUV.
+     * The capture ring, which handles both layouts.
      *
-     * Both rings exist because they are two different buffer layouts, not two
-     * analysers: the engine has a `process` and a `processRgba` entry point and
-     * shares every stage after the pixels arrive.
+     * One pool, not two: the two modes differ only in the pixel buffer, and two
+     * pools would be two places for the geometry to drift.
      */
-    private val frameRing = FrameRing(poolSize = 3)
+    private val frameRing = YuvFrameRing(poolSize = 3)
 
     private var displayWidth = 0
     private var displayHeight = 0
@@ -680,7 +676,7 @@ class RenderaOverlayService : Service() {
             return false
         }
 
-        yuvFrameRing.configure(captureWidth, captureHeight)
+        frameRing.configure(captureWidth, captureHeight)
         val reader = createImageReader()
         if (reader == null) {
             fail("reader", "Could not create a frame reader at ${captureWidth}x$captureHeight.")
@@ -745,8 +741,8 @@ class RenderaOverlayService : Service() {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
             return null
         }
-        val format = if (captureMode == CaptureMode.PRIVATE) {
-            android.graphics.ImageFormat.PRIVATE
+        val format = if (captureMode == CaptureMode.RGBA) {
+            android.graphics.ImageFormat.RGBA_8888
         } else {
             android.graphics.ImageFormat.YUV_420_888
         }
@@ -765,7 +761,7 @@ class RenderaOverlayService : Service() {
     }
 
     /** How the device chose to deliver frames. */
-    private enum class CaptureMode { YUV, PRIVATE }
+    private enum class CaptureMode { YUV, RGBA }
 
     @Volatile
     private var captureMode = CaptureMode.YUV
@@ -787,16 +783,16 @@ class RenderaOverlayService : Service() {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            val ok = if (captureMode == CaptureMode.PRIVATE) {
-                frameRing.publishPrivate(image)
+            val ok = if (captureMode == CaptureMode.RGBA) {
+                frameRing.publishRgba(image)
             } else {
-                yuvFrameRing.publish(image)
+                frameRing.publish(image)
             }
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
             val msg = t.message ?: ""
             if (captureMode == CaptureMode.YUV && msg.contains("buffer format")) {
-                switchToPrivateCapture()
+                switchToRgbaCapture()
             } else {
                 runCatching { events.error("capture", msg.take(120), t) }
             }
@@ -806,42 +802,40 @@ class RenderaOverlayService : Service() {
     }
 
     /**
-     * Rebuilds the capture in `PRIVATE` mode.
+     * Rebuilds the capture in `RGBA_8888` mode.
      *
-     * `PRIVATE` gives a `HardwareBuffer` instead of planes, so the engine gets
-     * interleaved RGBA and computes luma and the opponent signals itself. That is
-     * a copy the YUV path does not need, and it is also more accurate: the
-     * signals are channel comparisons in the source space rather than a YUV round
-     * trip.
+     * The fallback for a device that refuses to deliver YUV to a virtual
+     * display, which it reports as "the producer output buffer format 0x1
+     * doesn't match the ImageReader's configured buffer format 0x23" on every
+     * single frame. `RGBA_8888` is a documented ImageReader format with one
+     * interleaved plane, and the engine already knows how to read interleaved
+     * bytes - it computes luma and both opponent signals from them directly,
+     * which is faster than the YUV path and more accurate, because the signals
+     * are channel comparisons in the source space instead of a BT.601 round trip.
+     *
+     * `PRIVATE` is deliberately not used: it exposes its pixels only through
+     * `android.hardware.HardwareBuffer`, which is not in the public SDK.
      */
-    private fun switchToPrivateCapture() {
-        Log.w(TAG, "device refuses YUV_420_888; switching to PRIVATE capture")
-        runCatching { events.error("capture", "YUV_420_888 refused, using PRIVATE") }
-        captureMode = CaptureMode.PRIVATE
-        // The stride and format are only known once a buffer is locked, so the
-        // pool is sized generously and validated on the first frame.
-        val stride = ((captureWidth * 4 + 63) / 64) * 64
-        frameRing.configure(captureWidth, captureHeight, stride, android.graphics.PixelFormat.RGBA_8888)
-        yuvFrameRing.release()
-        frameRing.releaseAll()
+    private fun switchToRgbaCapture() {
+        Log.w(TAG, "device refuses YUV_420_888; switching to RGBA_8888 capture")
+        runCatching { events.error("capture", "YUV_420_888 refused, using RGBA_8888") }
+        captureMode = CaptureMode.RGBA
         val old = imageReader
         imageReader = createImageReader()
         val replacement = imageReader
         if (replacement == null) {
-            Log.e(TAG, "could not build a PRIVATE reader; capture is unavailable")
-            startFailure = "This device refused both YUV and PRIVATE capture."
+            startFailure = "This device refused both YUV and RGBA capture."
+            Log.e(TAG, startFailure!!)
             publishStatus(capturing = false, armed = false)
             return
         }
         runCatching {
             virtualDisplay?.setSurface(replacement.surface)
             old?.close()
-        }.onFailure {
-            Log.e(TAG, "could not repoint the virtual display", it)
-        }
+        }.onFailure { Log.e(TAG, "could not repoint the virtual display", it) }
         startFailure = null
         publishStatus(capturing = true)
-        Log.i(TAG, "PRIVATE capture active at ${captureWidth}x$captureHeight")
+        Log.i(TAG, "RGBA_8888 capture active at ${captureWidth}x$captureHeight")
     }
 
     private fun yuvRowStride(): Int = ((captureWidth + 15) / 16) * 16
@@ -927,8 +921,7 @@ class RenderaOverlayService : Service() {
             mediaProjection = null
         }
         suppressProjectionCallback = false
-        yuvFrameRing.release()
-        frameRing.releaseAll()
+        frameRing.release()
     }
 
     /**
@@ -1079,7 +1072,7 @@ class RenderaOverlayService : Service() {
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
-        val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV_420_888"
+        val mode = if (captureMode == CaptureMode.RGBA) "RGBA_8888" else "YUV_420_888"
         val suppressed = shouldSuppressDodge()
         val anchorsStale = anchors.calibrated &&
             anchors.calibratedForWidth != displayWidth
@@ -1107,9 +1100,8 @@ class RenderaOverlayService : Service() {
             " target=${prefs.targetPackage.value}" +
             " a11y=${RenderaAccessibilityService.isAvailable()}" +
             " mode=$mode" +
-            " yuvGot=${yuvFrameRing.receivedCount}" +
-            " privGot=${frameRing.receivedCount}" +
-            " privDrop=${frameRing.droppedCount}" +
+            " rgbaGot=${frameRing.receivedRgbaCount}" +
+            " rejected=${frameRing.rejectedCount}" +
             " idle=${RenderaAccessibilityService.isIdle()}" +
             " dodges=$dodgeCount"
         Log.i(TAG, line)
@@ -1217,7 +1209,7 @@ class RenderaOverlayService : Service() {
 
         Log.i(TAG, "Display changed ${beforeW}x$beforeH -> ${displayWidth}x$displayHeight")
         computeCaptureSize()
-        yuvFrameRing.configure(captureWidth, captureHeight)
+        frameRing.configure(captureWidth, captureHeight)
 
         // The ImageReader's size is fixed when it is built, so a geometry change
         // has to hand the VirtualDisplay a NEW surface. Resizing the display
@@ -1419,15 +1411,15 @@ class RenderaOverlayService : Service() {
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
             while (isActive) {
-                val privateMode = captureMode == CaptureMode.PRIVATE
-                val frame: Any? = if (privateMode) frameRing.take() else yuvFrameRing.take()
+                val privateMode = captureMode == CaptureMode.RGBA
+                val frame = if (privateMode) frameRing.take() else frameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)
                     continue
                 }
                 try {
                     val d = detector
-                    val haveFrame = if (privateMode) frameRing.width > 0 else yuvFrameRing.width > 0
+                    val haveFrame = frameRing.width > 0
                     if (d != null && haveFrame) {
                         // Re-read anchors and tuning when the user changes them,
                         // without a listener per write.
@@ -1455,8 +1447,8 @@ class RenderaOverlayService : Service() {
                         val analysis = synchronized(detectorLock) {
                             if (frame == null) {
                                 null
-                            } else if (privateMode) {
-                                val f = frame as FrameRing.Frame
+                            } else if (rgbaMode) {
+                                val f = frame
                                 d.processRgba(
                                     rgba = f.rgba,
                                     rowStride = f.rowStride,
@@ -1468,7 +1460,7 @@ class RenderaOverlayService : Service() {
                                     collectDebug = prefs.debugOverlayEnabled.value
                                 )
                             } else {
-                                val f = frame as YuvFrameRing.Frame
+                                val f = frame
                                 d.process(
                                     yPlane = f.y, yStride = f.yStride,
                                     uPlane = f.u, vPlane = f.v, uvStride = f.uvStride,
@@ -1704,7 +1696,7 @@ class RenderaOverlayService : Service() {
             isRunning = true,
             fps = latestFps,
             frameCount = framesReceived,
-            droppedFrames = if (captureMode == CaptureMode.PRIVATE) frameRing.droppedCount else yuvFrameRing.droppedCount,
+            droppedFrames = frameRing.droppedCount,
             threatsDetected = threatCount,
             dodgesExecuted = dodgeCount,
             lastDodgeAngleDeg = lastDodgeAngleDeg,
@@ -1773,7 +1765,7 @@ class RenderaOverlayService : Service() {
         // Armed but seeing nothing is a distinct state from armed and working,
         // and reporting both as "Armed" is why arming appeared to do nothing.
         if (framesAnalysed == 0L) {
-            val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"
+            val mode = if (captureMode == CaptureMode.RGBA) "RGBA" else "YUV"
             return "No frames via $mode. ${lastFrameAge()}"
         }
         if (latestAnalysis?.playerDetected != true) {
@@ -2552,7 +2544,7 @@ class RenderaOverlayService : Service() {
             // This button previously looked broken because every failure looked
             // identical from the menu.
             val why = "no frame analysed yet " +
-                "(mode ${if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"}, " +
+                "(mode ${if (captureMode == CaptureMode.RGBA) "RGBA" else "YUV"}, " +
                 "got ${framesReceived}, rejected ${framesRejected}, " +
                 "analysed ${framesAnalysed})"
             mainHandler.post {

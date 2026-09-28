@@ -73,6 +73,8 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     val hasFrame: Boolean get() = publishedId != NO_FRAME
     val consumedCount: Long get() = consumedFrames
     val droppedCount: Long get() = droppedFrames
+    val receivedRgbaCount: Long get() = receivedRgba
+    val rejectedCount: Long get() = rejectedFrames
 
     /** Sizes the pool. Safe to call on a configuration change. */
     fun configure(width: Int, height: Int) {
@@ -205,12 +207,49 @@ class YuvFrameRing(private val poolSize: Int = 3) {
      * this correct everywhere: some devices report a tight plane, some pad the
      * row, and some use a semi-planar layout with `pixelStride == 2` for chroma.
      */
+    /**
+     * Copies an `RGBA_8888` image into the pool.
+     *
+     * One interleaved plane, so the whole frame is a row-wise copy with a pixel
+     * stride of four. `pixelStride` is honoured rather than assumed, because the
+     * format says "interleaved" but not always "tightly packed".
+     */
+    fun publishRgba(image: Image): Boolean {
+        if (image.width != width || image.height != height) {
+            rejectedFrames++
+            return false
+        }
+        val planes = image.planes
+        if (planes.isEmpty()) {
+            rejectedFrames++
+            return false
+        }
+        val slot = acquire() ?: run { rejectedFrames++; return false }
+        return try {
+            val ok = copyPlane(planes[0], slot.rgba, slot.rgbaStride, width, height, 4)
+            if (!ok) {
+                rejectedFrames++
+                recycle(slot)
+                return false
+            }
+            slot.rgba.clear()
+            receivedRgba++
+            publish(slot)
+            true
+        } catch (t: Throwable) {
+            rejectedFrames++
+            recycle(slot)
+            false
+        }
+    }
+
     private fun copyPlane(
         plane: Image.Plane,
         dst: ByteBuffer,
         dstRowStride: Int,
         samples: Int,
-        rows: Int
+        rows: Int,
+        pixelStride: Int = 1
     ) {
         if (samples <= 0 || rows <= 0) return
         val buffer = plane.buffer
@@ -219,7 +258,7 @@ class YuvFrameRing(private val poolSize: Int = 3) {
         val limit = buffer.limit()
         dst.clear()
 
-        if (srcPixelStride == 1 && srcRowStride == dstRowStride) {
+        if (srcPixelStride == pixelStride && srcRowStride == dstRowStride) {
             // Fast path: tight plane with matching stride, one bulk copy. The
             // length is clamped because the plane limit is frequently smaller
             // than rows * rowStride.
