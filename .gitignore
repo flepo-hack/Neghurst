@@ -16,3 +16,8 @@
 local.properties
 .env
 debug.keystore
+
+# The optional OpenCV Android SDK is unpacked here, not committed.
+app/src/main/cpp/opencv/*
+!app/src/main/cpp/opencv/README.md
+

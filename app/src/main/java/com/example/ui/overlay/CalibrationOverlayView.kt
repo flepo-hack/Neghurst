@@ -168,6 +168,23 @@ class CalibrationOverlayView(
     private val baseWidth: Float get() = if (width > 0) width.toFloat() else displayWidthPx.toFloat()
     private val baseHeight: Float get() = if (height > 0) height.toFloat() else displayHeightPx.toFloat()
 
+    /**
+     * A stick radius a person can actually see and adjust.
+     *
+     * The stored value is a fraction of the screen width, so on a narrow portrait
+     * display it can round up to something covering most of the view, which is
+     * what was reported. Bounded here against the SHORT edge, and against a
+     * fraction of the smaller dimension so the reticle can never dominate the
+     * playfield it is meant to sit on.
+     */
+    private fun saneStickRadius(norm: Float, w: Float, h: Float): Float {
+        val shortEdge = minOf(w, h)
+        val lower = shortEdge * 0.06f
+        val upper = shortEdge * 0.20f
+        val fromNorm = if (w > 0f) norm * w else shortEdge * 0.12f
+        return fromNorm.coerceIn(lower, upper)
+    }
+
     fun applyAnchors(value: Anchors) {
         anchors = value
         val w = baseWidth
@@ -176,7 +193,7 @@ class CalibrationOverlayView(
         joyY = value.joystickY * h
         playerX = value.playerX * w
         playerY = value.playerY * h
-        stickRadius = (value.joystickRadiusNorm * w).coerceAtLeast(dp(48f))
+        stickRadius = saneStickRadius(value.joystickRadiusNorm, w, h)
         invalidate()
     }
 
@@ -452,7 +469,7 @@ class CalibrationOverlayView(
             joystickY = (joyY / bh).coerceIn(0f, 1f),
             playerX = (playerX / bw).coerceIn(0f, 1f),
             playerY = (playerY / bh).coerceIn(0f, 1f),
-            joystickRadiusNorm = (stickRadius / bw).coerceIn(0.02f, 0.45f)
+            joystickRadiusNorm = (stickRadius / bw).coerceIn(0.03f, 0.30f)
         )
         invalidate()
         callbacks.onAnchorMoved(activeTarget, cx, cy)
@@ -483,7 +500,7 @@ class CalibrationOverlayView(
         joystickY = (joyY / bh).coerceIn(0f, 1f),
         playerX = (playerX / bw).coerceIn(0f, 1f),
         playerY = (playerY / bh).coerceIn(0f, 1f),
-        joystickRadiusNorm = (stickRadius / bw).coerceIn(0.02f, 0.45f),
+        joystickRadiusNorm = (stickRadius / bw).coerceIn(0.03f, 0.30f),
         calibrated = true,
         calibratedForWidth = displayWidthPx,
         calibratedForHeight = displayHeightPx

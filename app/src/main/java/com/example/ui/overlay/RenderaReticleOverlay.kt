@@ -154,18 +154,24 @@ class RenderaReticleOverlay(context: Context) : View(context) {
     }
 
     private fun drawJoystick(canvas: Canvas, m: Mark) {
+        // Same bound the calibration view applies, so the circle drawn here is the
+        // one that was actually calibrated. An unbounded radius covering most of
+        // the display was reported as "the joystick is the size of the screen".
+        val shortEdge = minOf(width, height).toFloat().coerceAtLeast(1f)
+        val r = m.radius.coerceIn(shortEdge * 0.06f, shortEdge * 0.20f)
+        val m2 = m.copy(radius = r)
         ringPaint.color = Color.argb(200, 0, 240, 255)
         ringPaint.strokeWidth = dp(2f)
-        canvas.drawCircle(m.x, m.y, m.radius, ringPaint)
+        canvas.drawCircle(m2.x, m2.y, m2.radius, ringPaint)
         // Cross hairs at the extremes of the usable travel, so it is obvious
         // where the stick can actually reach.
-        val t = m.radius * 0.28f
+        val t = m2.radius * 0.28f
         ringPaint.color = Color.argb(120, 0, 240, 255)
-        canvas.drawLine(m.x - m.radius, m.y, m.x + m.radius, m.y, ringPaint)
-        canvas.drawLine(m.x, m.y - m.radius, m.x, m.y + m.radius, ringPaint)
+        canvas.drawLine(m2.x - m2.radius, m2.y, m2.x + m2.radius, m2.y, ringPaint)
+        canvas.drawLine(m2.x, m2.y - m2.radius, m2.x, m2.y + m2.radius, ringPaint)
         ringPaint.color = Color.argb(90, 0, 240, 255)
-        canvas.drawCircle(m.x, m.y, t, ringPaint)
-        drawLabel(canvas, m.x + m.radius + dp(3f), m.y, m.label)
+        canvas.drawCircle(m2.x, m2.y, t, ringPaint)
+        drawLabel(canvas, m2.x + m2.radius + dp(3f), m2.y, m2.label)
     }
 
     private fun drawProjectile(canvas: Canvas, m: Mark) {

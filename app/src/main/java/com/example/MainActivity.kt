@@ -93,6 +93,14 @@ class MainActivity : ComponentActivity() {
     private var screenCaptureResultCode: Int = 0
     private var screenCaptureData: Intent? = null
 
+    /**
+     * The service's observable state, held as a field so the Activity methods can
+     * read it as well as the composable. Reading a composable local from an
+     * Activity method does not compile, and duplicating the state would let the
+     * two disagree.
+     */
+    private val serviceStatusFlow by lazy { RenderaOverlayService.status }
+
     private val mediaProjectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -197,12 +205,62 @@ class MainActivity : ComponentActivity() {
             putExtra(RenderaOverlayService.EXTRA_PACKAGE_NAME, packageName)
         }
 
+        // The token is single use. Clear it the moment it has been handed over,
+        // so a later start asks for a fresh grant rather than replaying a spent
+        // one, which fails on Android 14 and later and used to be reported as
+        // "please grant screen recording" after the user had already granted it.
+        val hadToken = screenCaptureResultCode != 0
+        screenCaptureResultCode = 0
+        screenCaptureData = null
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
             startService(intent)
         }
-        Toast.makeText(this, "Rendera bubble active on screen!", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            this,
+            if (hadToken) "Starting capture..." else "Grant screen recording first",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    /**
+     * Shares the diagnostics from the app itself.
+     *
+     * Also in the in-game menu, but if the capture never starts there is no
+     * bubble to long press - and in that situation the log is the only evidence of
+     * what went wrong. Text only, never a file URI: `ACTION_SEND` with a
+     * `Uri.fromFile` stream throws FileUriExposedException on Android 7 and later.
+     */
+    private fun shareDiagnosticsFromActivity() {
+        try {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            val source = java.io.File(dir, "rendera-events.jsonl")
+            val text = buildString {
+                appendLine("Rendera ${BuildConfig.VERSION_NAME} on " +
+                    "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
+                    "Android ${android.os.Build.VERSION.SDK_INT}")
+                appendLine("  service running    ${serviceStatusFlow.value.running}")
+                appendLine("  capture running    ${serviceStatusFlow.value.capturing}")
+                appendLine("  native engine      ${serviceStatusFlow.value.nativeAvailable}")
+                appendLine("  accessibility     ${serviceStatusFlow.value.accessibilityReady}")
+                appendLine("  anchors            ${serviceStatusFlow.value.anchorsCalibrated}")
+                appendLine("  target             ${serviceStatusFlow.value.targetPackage}")
+                appendLine("  foreground app     ${serviceStatusFlow.value.foregroundPackage}")
+                appendLine("  fps                ${serviceStatusFlow.value.fps}")
+                appendLine("  full log: ${source.absolutePath} (${source.length()} bytes)")
+            }
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "Rendera diagnostics")
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            startActivity(Intent.createChooser(share, "Send Rendera diagnostics"))
+        } catch (t: Throwable) {
+            android.util.Log.w("Rendera", "Could not share diagnostics", t)
+            Toast.makeText(this, "Could not export diagnostics", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun stopOverlayService() {
@@ -234,7 +292,7 @@ class MainActivity : ComponentActivity() {
         // The service publishes observable state; a bare `var` read during
         // composition never triggers a recomposition, so the status pill used to
         // show whatever was true the first time the screen was drawn.
-        val serviceStatus by RenderaOverlayService.status.collectAsState()
+        val serviceStatus by serviceStatusFlow.collectAsState()
 
         // Re-read the permission rows whenever the Activity resumes.
         LaunchedEffect(resumeTick) {
@@ -646,7 +704,61 @@ class MainActivity : ComponentActivity() {
 
                         Spacer(modifier = Modifier.height(18.dp))
 
-                        // SYSTEM PERMISSIONS
+                        // DIAGNOSTICS. Reachable here as well as in the in-game menu: if the
+        // capture never starts there is no bubble to long press, and the log is
+        // then the only way to find out why.
+        Spacer(modifier = Modifier.height(18.dp))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF1A1526))
+                .border(1.dp, ElectricViolet.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                .padding(16.dp)
+        ) {
+            Column {
+                Text(
+                    text = "DIAGNOSTICS",
+                    color = ElectricViolet,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = if (serviceStatus.running) {
+                        "Service is running. ${serviceStatus.fps} fps."
+                    } else {
+                        "Service is not running."
+                    },
+                    color = Color(0xFFD4C7E6),
+                    fontSize = 11.sp
+                )
+                if (!serviceStatus.capturing) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Capture is NOT running. Send the log to find out why.",
+                        color = Color(0xFFFFB44D),
+                        fontSize = 11.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = { shareDiagnosticsFromActivity() },
+                    modifier = Modifier.fillMaxWidth(0.92f).height(52.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = ElectricViolet,
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text("SEND DIAGNOSTICS", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        // SYSTEM PERMISSIONS
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()

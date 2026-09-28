@@ -474,16 +474,22 @@ class RenderaOverlayService : Service() {
         // ability to acquire a projection at all - intact.
         if (mediaProjection != null || virtualDisplay != null) {
             releaseCapture()
+        } else if (resultCode != 0 && data != null) {
+            // About to spend the token. If anything downstream then fails, the
+            // next start must ask for a new grant rather than replay this one.
+            consentTokenSpent = false
         }
 
         if (!setupCapture(resultCode, data)) {
-            startFailure = "Screen capture could not start. Try granting it again."
-            Log.e(TAG, "setupCapture refused")
+            // setupCapture has already named the step in the status. The only
+            // thing left is to make sure the user can actually recover.
             showBubbleOnly()
-            publishStatus(capturing = false, armed = false)
-            mainHandler.post { toast("Screen capture failed. Tap the bubble to retry.") }
+            mainHandler.post {
+                toast(startFailure ?: "Screen capture failed. Tap the bubble to retry.")
+            }
             return
         }
+        consentTokenSpent = true
 
         captureEnded = false
         projectionStopHandled = false
@@ -579,36 +585,67 @@ class RenderaOverlayService : Service() {
      * API 34 the system rejects `createVirtualDisplay()` with
      * `IllegalStateException` unless `registerCallback()` ran first.
      */
+    /**
+     * Acquires a projection and points it at a frame reader.
+     *
+     * ## Why this reports a step and not just "failed"
+     *
+     * Every version of this collapsed every failure into a single "capture
+     * could not start", and that message was useless: "no capture, please grant
+     * screen recording" is what the user saw **after they had already granted
+     * it**, and it sent every attempt at the problem looking for a missing
+     * permission that was not missing. So each step is named, the exception is
+     * recorded, and the step is put in the status and in the event log.
+     *
+     * ## Why the token is never reused
+     *
+     * A MediaProjection consent token is **single use**. Once a projection has
+     * been created from it, re-acquiring with the same token fails on Android 14
+     * and later. The Activity therefore hands the token over once and clears it,
+     * and a second attempt is told plainly that a fresh grant is needed instead
+     * of retrying with something that can no longer work.
+     */
     private fun setupCapture(resultCode: Int, data: Intent?): Boolean {
         if (resultCode == 0 || data == null) {
-            Log.e(TAG, "No MediaProjection consent; vision cannot start")
-            mainHandler.post { toast("Screen capture permission is required") }
+            fail("no-consent", "No screen capture consent. Grant it in Rendera.")
             return false
         }
-        if (mediaProjection != null) return true
+        if (resolveDisplayGeometry().not() || displayWidth < 16 || displayHeight < 16) {
+            fail("geometry", "Screen size not resolved (${displayWidth}x$displayHeight).")
+            return false
+        }
+        computeCaptureSize()
+        if (captureWidth < 16 || captureHeight < 16) {
+            fail("geometry", "Capture size invalid: ${captureWidth}x$captureHeight.")
+            return false
+        }
 
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = try {
-            mpm.getMediaProjection(resultCode, data)
+
+        // The typed foreground call is not optional and is not best effort. A
+        // MediaProjection may only be used while the service holds the
+        // mediaProjection foreground type, and swallowing a failure here means
+        // the next call throws with a message that points somewhere else entirely.
+        try {
+            upgradeForegroundToMediaProjection()
         } catch (t: Throwable) {
-            Log.e(TAG, "getMediaProjection failed", t)
-            mainHandler.post { toast("Screen capture could not be started") }
+            fail("foreground",
+                "Foreground media projection refused: ${t.message ?: t.javaClass.simpleName}", t)
             return false
         }
-        if (projection == null) {
-            Log.e(TAG, "getMediaProjection returned null")
+
+        val projection: MediaProjection = try {
+            mpm.getMediaProjection(resultCode, data)
+                ?: run { fail("get", "getMediaProjection returned null."); return false }
+        } catch (t: Throwable) {
+            // The overwhelmingly common cause here: the token was already spent
+            // by an earlier attempt. Say that, instead of implying a missing
+            // permission the user has already given.
+            fail("token", "Consent token rejected: ${t.message ?: t.javaClass.simpleName}", t)
             return false
         }
         mediaProjection = projection
 
-        // The token now exists, so the typed foreground call is safe.
-        runCatching { upgradeForegroundToMediaProjection() }
-            .onFailure { Log.w(TAG, "typed foreground upgrade failed", it) }
-
-        resolveDisplayGeometry()
-        computeCaptureSize()
-
-        // 1. Callback FIRST. Without it, createVirtualDisplay throws on API 34+.
         val callback = object : MediaProjection.Callback() {
             override fun onStop() {
                 Log.w(TAG, "MediaProjection stopped by the system or the user")
@@ -617,21 +654,21 @@ class RenderaOverlayService : Service() {
         }
         mediaProjectionCallback = callback
         try {
+            // Required before createVirtualDisplay on Android 14 and later.
             projection.registerCallback(callback, mainHandler)
         } catch (t: Throwable) {
-            Log.e(TAG, "registerCallback failed", t)
+            fail("callback", "registerCallback failed: ${t.message ?: t.javaClass.simpleName}", t)
+            return false
         }
 
-        // 2. Reader. YUV_420_888 so we can read the luma plane directly.
         frameRing.configure(captureWidth, captureHeight)
         val reader = createImageReader()
         if (reader == null) {
-            releaseCapture()
+            fail("reader", "Could not create a frame reader at ${captureWidth}x$captureHeight.")
             return false
         }
         imageReader = reader
 
-        // 3. Virtual display.
         virtualDisplay = try {
             projection.createVirtualDisplay(
                 "RenderaVision",
@@ -644,19 +681,28 @@ class RenderaOverlayService : Service() {
                 null
             )
         } catch (t: Throwable) {
-            Log.e(TAG, "createVirtualDisplay failed", t)
-            mainHandler.post { toast("Screen capture could not start (API level)") }
-            null
-        }
-
-        if (virtualDisplay == null) {
-            Log.e(TAG, "virtualDisplay is null; no frames will arrive")
-            releaseCapture()
+            fail("display",
+                "createVirtualDisplay refused at ${captureWidth}x$captureHeight: " +
+                    "${t.message ?: t.javaClass.simpleName}", t)
             return false
         }
 
-        Log.i(TAG, "Capture started: ${captureWidth}x$captureHeight, display ${displayWidth}x$displayHeight")
+        startFailure = null
+        captureEnded = false
+        projectionStopHandled = false
+        Log.i(TAG, "Capture started: ${captureWidth}x$captureHeight on ${displayWidth}x$displayHeight")
         return true
+    }
+
+    /**
+     * Records which step failed, so the status and the event log name it rather
+     * than saying "capture failed" and leaving the user to guess.
+     */
+    private fun fail(step: String, message: String, throwable: Throwable? = null) {
+        startFailure = message
+        Log.e(TAG, "Capture failed at '$step': $message", throwable)
+        runCatching { events.error("capture:$step", message, throwable) }
+        publishStatus(capturing = false, armed = false)
     }
 
     /**
@@ -869,6 +915,17 @@ class RenderaOverlayService : Service() {
             .onFailure { Log.e(TAG, "could not show the restart notice", it) }
     }
 
+    /**
+     * True once a consent token has been handed to `getMediaProjection`.
+     *
+     * A MediaProjection token is single use, so this is what distinguishes "the
+     * user never granted anything" from "the grant was already spent by an
+     * earlier attempt". Without it the second case reports the first, which is
+     * why the user kept seeing "grant screen recording" after they had granted
+     * it.
+     */
+    @Volatile private var consentTokenSpent = false
+
     /** Whether the capture was torn down and has not been re-armed. */
     @Volatile private var captureEnded = false
     @Volatile private var projectionStopHandled = false
@@ -976,7 +1033,14 @@ class RenderaOverlayService : Service() {
      * `resources.displayMetrics` reports this service's own window, which is
      * wrong whenever the game is in split screen or freeform.
      */
-    private fun resolveDisplayGeometry() {
+    /**
+     * Resolves the real display size, rotation applied.
+     *
+     * @return true when a usable size was obtained. Callers must not proceed
+     *         otherwise: a capture created against an unresolved size either
+     *         throws or silently produces frames of the wrong dimensions.
+     */
+    private fun resolveDisplayGeometry(): Boolean {
         try {
             val dm = getSystemService(DisplayManager::class.java)
             val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
@@ -999,6 +1063,7 @@ class RenderaOverlayService : Service() {
             displayWidth = dm.widthPixels
             displayHeight = dm.heightPixels
         }
+        return displayWidth >= 16 && displayHeight >= 16
     }
 
     /**
@@ -1043,7 +1108,7 @@ class RenderaOverlayService : Service() {
     private fun onGeometryChanged() {
         val beforeW = displayWidth
         val beforeH = displayHeight
-        resolveDisplayGeometry()
+        runCatching { resolveDisplayGeometry() }
         if (beforeW == displayWidth && beforeH == displayHeight) return
 
         Log.i(TAG, "Display changed ${beforeW}x$beforeH -> ${displayWidth}x$displayHeight")
@@ -1127,7 +1192,7 @@ class RenderaOverlayService : Service() {
 
     private fun ensureDetector() {
         if (detector != null) return
-        if (displayWidth <= 0 || displayHeight <= 0) resolveDisplayGeometry()
+        if (displayWidth <= 0 || displayHeight <= 0) runCatching { resolveDisplayGeometry() }
         val (gw, gh) = ScreenThreatDetector.gridForCapture(captureWidth, captureHeight)
         val d = ScreenThreatDetector(gw, gh, displayWidth, displayHeight)
         anchors = prefs.anchorsFor(displayWidth, displayHeight)
@@ -1551,15 +1616,23 @@ class RenderaOverlayService : Service() {
      * loaded. Capture comes first because everything else depends on it, and the
      * three "no engine" cases are now distinguished from each other.
      */
+    /** How long ago the last frame was analysed, phrased for a human. */
+    private fun lastFrameAge(): String {
+        val t = lastFrameAtMs
+        if (t == 0L) return "capture has produced nothing"
+        val age = (SystemClock.elapsedRealtime() - t) / 1000L
+        return if (age < 2) "frames are arriving" else "no frame for ${age}s"
+    }
+
     private fun buildAdvice(): String {
         // Truncated: the panel shows three lines and a full sentence here
         // overflows it, which is what "the text comes out" was.
         startFailure?.let { return it.take(70) }
         if (!_status.value.capturing) {
-            return if (framesReceived == 0L) {
-                "No capture. Tap the bubble."
-            } else {
-                "Capture stopped. Tap to retry."
+            return when {
+                framesReceived > 0L -> "Capture stopped. Tap to retry."
+                consentTokenSpent -> "Grant used up. Tap the bubble."
+                else -> "No capture. Tap the bubble."
             }
         }
         val d = detector
@@ -1576,11 +1649,16 @@ class RenderaOverlayService : Service() {
         if (shouldSuppressDodge()) {
             return "${prefs.targetPackage.value} not in front."
         }
-        return if (autoDodgeArmed) {
-            "Armed. ${latestFps} fps, ${framesReceived} frames."
-        } else {
-            "Paused. Tap the bubble to arm."
+        if (!autoDodgeArmed) return "Paused. Tap the bubble to arm."
+        // Armed but seeing nothing is a distinct state from armed and working,
+        // and reporting both as "Armed" is why arming appeared to do nothing.
+        if (framesAnalysed == 0L) {
+            return "Armed, but no frames analysed. ${lastFrameAge()}."
         }
+        if (latestAnalysis?.playerDetected != true) {
+            return "Armed, no player lock. Using the anchor."
+        }
+        return "Armed. ${latestFps} fps, ${framesAnalysed} frames."
     }
 
     /**
@@ -1873,9 +1951,18 @@ class RenderaOverlayService : Service() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBackground(COLOR_MENU)
+            background = panelBackground()
             elevation = dp(12f)
+            setPadding(0, 0, 0, dp(6f))
         }
+        // A heading, so the panel is obviously a menu and not a stray rectangle.
+        root.addView(TextView(this).apply {
+            text = "RENDERA"
+            setTextColor(0xFFEDE7FF.toInt())
+            textSize = 11f
+            letterSpacing = 0.2f
+            setPadding(dp(14f).roundToInt(), dp(10f).roundToInt(), dp(14f).roundToInt(), dp(4f).roundToInt())
+        })
 
         /**
          * One menu row.
@@ -1908,6 +1995,8 @@ class RenderaOverlayService : Service() {
                     clicked.post { runClick(onClick) }
                 }
             }
+            // A hairline between rows so the buttons read as separate targets.
+            view.setBackgroundColor(0x1AFFFFFF)
             root.addView(
                 view,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, rowH)
@@ -1964,7 +2053,8 @@ class RenderaOverlayService : Service() {
         }
 
         val status = TextView(this).apply {
-            text = buildAdvice()
+            text = pendingMenuStatus ?: buildAdvice()
+            pendingMenuStatus = null
             setTextColor(0xFF9C93B8.toInt())
             textSize = 10f
             // Bounded: an unbounded TextView here grows the panel and pushes the
@@ -2211,7 +2301,7 @@ class RenderaOverlayService : Service() {
 
     private fun showCalibrationOverlay() {
         if (calibrationView != null) return
-        resolveDisplayGeometry()
+        runCatching { resolveDisplayGeometry() }
         // Start from whatever the user last committed; if nothing is committed,
         // start from the game's actual HUD layout so the crosshair lands on the
         // stick to begin with instead of in a corner.
@@ -2336,8 +2426,14 @@ class RenderaOverlayService : Service() {
 
         val live = latestAnalysis
         if (live == null) {
+            // Say WHY, with the frame counts, instead of a bare "no frame yet".
+            // This button previously looked broken because every failure looked
+            // identical from the menu.
+            val why = "no frame analysed yet (got ${framesReceived}, " +
+                "analysed ${framesAnalysed})"
             mainHandler.post {
-                toast("No frame analysed yet. Wait a second, then retry.")
+                toast(why)
+                openMenuWithStatus(why)
             }
             return
         }
@@ -2353,8 +2449,10 @@ class RenderaOverlayService : Service() {
             return
         }
         if (!live.playerDetected && !anchors.calibrated) {
+            val why = "player not found on open ground (blobs ${live.blobCount})"
             mainHandler.post {
-                toast("Player not locked and no anchor committed; use LOCK & ACTIVATE")
+                toast(why)
+                openMenuWithStatus(why)
             }
             return
         }
@@ -2388,6 +2486,14 @@ class RenderaOverlayService : Service() {
         }
     }
 
+    /** Reopens the menu carrying a specific reason, so a failure is readable. */
+    private fun openMenuWithStatus(reason: String) {
+        pendingMenuStatus = reason
+        openMenu(0, 0)
+    }
+
+    private var pendingMenuStatus: String? = null
+
     private fun anchorCurrentOverlay(value: Anchors) {
         calibrationView?.applyAnchors(value)
     }
@@ -2411,6 +2517,15 @@ class RenderaOverlayService : Service() {
         }
 
     private fun dp(v: Float): Float = v * resources.displayMetrics.density
+
+    /** The menu panel: rounded, opaque and outlined, so it reads as a control. */
+    private fun panelBackground() =
+        android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = dp(16f)
+            setColor(COLOR_MENU)
+            setStroke(dp(1f).roundToInt(), 0x66FFFFFF)
+        }
 
     private fun roundedBackground(color: Int) =
         android.graphics.drawable.GradientDrawable().apply {

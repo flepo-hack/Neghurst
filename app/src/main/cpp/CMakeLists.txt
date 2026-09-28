@@ -66,6 +66,10 @@ target_link_libraries(rendera_native
 # Calling `cv::*` from our own NDK code therefore requires the OpenCV Android
 # SDK (static libs + headers), which is what this block wires up.
 # ---------------------------------------------------------------------------
+# Resolution order, so enabling it needs no edit to this file:
+#   1. -DRENDERA_OPENCV_SDK=/path/to/OpenCV-android-sdk
+#   2. $RENDERA_OPENCV_SDK
+#   3. <repo>/app/src/main/cpp/opencv        (unpack the SDK here)
 set(_opencv_sdk "")
 if(RENDERA_OPENCV_SDK)
   set(_opencv_sdk "${RENDERA_OPENCV_SDK}")
@@ -73,6 +77,14 @@ elseif(DEFINED ENV{RENDERA_OPENCV_SDK})
   set(_opencv_sdk "$ENV{RENDERA_OPENCV_SDK}")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/opencv/sdk/jni")
   set(_opencv_sdk "${CMAKE_CURRENT_SOURCE_DIR}/opencv")
+endif()
+
+if(_opencv_sdk AND NOT EXISTS "${_opencv_sdk}/sdk/jni/abi-arm64-v8a")
+  message(WARNING
+    "RENDERA_OPENCV_SDK is set to '${_opencv_sdk}' but it has no sdk/jni/abi-arm64-v8a.\n"
+    "That is not an OpenCV Android SDK. The `org.opencv:opencv` AAR will NOT work here:\n"
+    "it exports only the JNI bridge, so cv:: is unreachable from this NDK build.\n"
+    "Continuing with the dependency free core. See docs/VERIFICATION.md section 6.")
 endif()
 
 if(_opencv_sdk AND EXISTS "${_opencv_sdk}/sdk/jni/abi-arm64-v8a")
