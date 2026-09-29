@@ -167,6 +167,23 @@ class RenderaOverlayService : Service() {
         private const val STATS_INTERVAL_MS = 1000L
 
         /**
+         * Capture format values, named rather than referenced.
+         *
+         * `ImageFormat.YUV_420_888` is in the public SDK, but `YCBCR_420_888` and
+         * `PRIVATE` are not - they cannot be named at all, which is the only reason
+         * these are numbers. All three are stable platform ABI constants, and
+         * they are exactly what the framework compares in its refusal message, so
+         * matching them precisely is the whole point.
+         *
+         * `RGBA_8888` is deliberately absent: its value is 1, the same as
+         * `PRIVATE`, so a reader created with it is a PRIVATE reader and exposes
+         * no planes, despite looking like the obvious choice.
+         */
+        const val FMT_YUV_420_888 = 0x13
+        const val FMT_YCBCR_420_888 = 0x23
+        const val FMT_PRIVATE = 0x01
+
+        /**
          * How long the foreground app must disagree with the target before
          * dodging is suppressed. Long enough that no focus flap reaches it.
          */
@@ -778,15 +795,12 @@ class RenderaOverlayService : Service() {
      * `ImageFormat.PRIVATE`, so a reader created with it is a PRIVATE reader and
      * exposes no planes.
      */
-    private val captureFormats = intArrayOf(
-        android.graphics.ImageFormat.YUV_420_888,
-        android.graphics.ImageFormat.YCBCR_420_888
-    )
+    private val captureFormats = intArrayOf(FMT_YUV_420_888, FMT_YCBCR_420_888)
 
     private fun formatName(f: Int): String = when (f) {
-        android.graphics.ImageFormat.YUV_420_888 -> "YUV_420_888"
-        android.graphics.ImageFormat.YCBCR_420_888 -> "YCBCR_420_888"
-        android.graphics.ImageFormat.PRIVATE -> "PRIVATE"
+        FMT_YUV_420_888 -> "YUV_420_888"
+        FMT_YCBCR_420_888 -> "YCBCR_420_888"
+        FMT_PRIVATE -> "PRIVATE"
         else -> "0x" + Integer.toHexString(f)
     }
 
