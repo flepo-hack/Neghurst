@@ -84,6 +84,8 @@ import com.example.ui.theme.ThreatRed
 import com.example.ui.theme.WarningAmber
 import kotlinx.coroutines.delay
 
+private const val REQUEST_OVERLAY = 4712
+
 class MainActivity : ComponentActivity() {
 
     private lateinit var prefs: RenderaPreferences
@@ -110,12 +112,15 @@ class MainActivity : ComponentActivity() {
             screenCaptureData = result.data
             Toast.makeText(this, "Screen capture authorized successfully!", Toast.LENGTH_SHORT).show()
 
+            // The game the user was picking is carried through the consent
+            // dialog and started here, so the app is only ever launched once a
+            // token actually exists.
             val game = pendingGameToLaunch
+            pendingGameToLaunch = null
             if (game != null) {
                 startOverlayAndLaunchGame(game)
-                pendingGameToLaunch = null
             } else {
-                startOverlayService("Universal")
+                startOverlayAndLaunchGame(GameAppInfo("Universal", ""))
             }
         } else {
             Toast.makeText(this, "Screen capture permission is required for vision detection.", Toast.LENGTH_SHORT).show()
@@ -124,6 +129,21 @@ class MainActivity : ComponentActivity() {
 
     /** Bumped on every resume so the permission rows re-read themselves. */
     private var resumeTickState = mutableIntStateOf(0)
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_OVERLAY) return
+        val game = pendingGameToLaunch ?: return
+        if (!checkOverlayPermission()) {
+            Toast.makeText(
+                this,
+                "Overlay permission was not granted, so nothing can be drawn.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        startOverlayAndLaunchGame(game)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -305,10 +325,56 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Rendera bubble stopped.", Toast.LENGTH_SHORT).show()
     }
 
+    /**
+     * Starts capture and the service, in that order, then launches the game.
+     *
+     * The capture consent dialog was never shown from here: the game was
+     * launched immediately, the service started with no token, and the system
+     * dialog the user was told to expect never appeared. The token is handed over
+     * by [mediaProjectionLauncher] on success, which calls straight back into
+     * here with [pendingGameToLaunch] set, so the game is only launched once
+     * consent actually exists.
+     */
     private fun startOverlayAndLaunchGame(game: GameAppInfo) {
+        if (!checkOverlayPermission()) {
+            requestOverlayPermissionThenContinue(game)
+            return
+        }
+        if (screenCaptureResultCode == 0 || screenCaptureData == null) {
+            Toast.makeText(
+                this,
+                "Rendera needs screen capture. Approve it to continue.",
+                Toast.LENGTH_LONG
+            ).show()
+            pendingGameToLaunch = game
+            requestMediaProjection()
+            return
+        }
         startOverlayService(game.appName, game.packageName)
         if (game.packageName.isNotEmpty()) {
             appsRepo.launchApp(game.packageName)
+        }
+    }
+
+    /**
+     * Asks for the overlay permission and continues once it is granted.
+     *
+     * The overlay is what draws the bubble and the calibration screen, so
+     * without it the app is a launcher for a service that can draw nothing.
+     */
+    private fun requestOverlayPermissionThenContinue(game: GameAppInfo) {
+        Toast.makeText(
+            this,
+            "Rendera needs permission to draw over other apps.",
+            Toast.LENGTH_LONG
+        ).show()
+        try {
+            startActivityForResult(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
+                REQUEST_OVERLAY
+            )
+        } catch (t: Throwable) {
+            Toast.makeText(this, "Could not open the overlay settings", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -525,7 +591,13 @@ class MainActivity : ComponentActivity() {
                                 if (isRunning) {
                                     stopOverlayService()
                                 } else {
-                                    showGameSelectDialog = true
+                                    // Universal: no game to launch, but the
+                                    // consent dialog is still required, and it
+                                    // used to be skipped on this path.
+                                    pendingGameToLaunch = null
+                                    startOverlayAndLaunchGame(
+                                        GameAppInfo("Universal", "")
+                                    )
                                 }
                             },
                             modifier = Modifier
