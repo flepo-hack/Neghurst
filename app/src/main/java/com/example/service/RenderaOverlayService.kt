@@ -761,7 +761,7 @@ class RenderaOverlayService : Service() {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
             return null
         }
-        val format = captureFormats[captureMode.ordinal]
+        val format = captureFormats[formatIndex.coerceIn(0, captureFormats.lastIndex)]
         return try {
             val reader = ImageReader.newInstance(captureWidth, captureHeight, format, 2)
             reader.setOnImageAvailableListener(
@@ -777,8 +777,6 @@ class RenderaOverlayService : Service() {
     }
 
     /** How the device chose to deliver frames. */
-    private enum class CaptureMode { YUV, YCBCR, PRAGUE }
-
     /**
      * The formats to try, in order, with the value each one has.
      *
@@ -804,8 +802,9 @@ class RenderaOverlayService : Service() {
         else -> "0x" + Integer.toHexString(f)
     }
 
+    /** Index into [captureFormats]; advanced on a format refusal. */
     @Volatile
-    private var captureMode = CaptureMode.YUV
+    private var formatIndex = 0
 
     /** The exact format value handed to the ImageReader, for the log. */
     @Volatile
@@ -828,11 +827,10 @@ class RenderaOverlayService : Service() {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            val ok = if (captureMode == CaptureMode.PRIVATE) {
-                frameRing.publishPrivate(image)
-            } else {
-                frameRing.publish(image)
-            }
+            // One publish path for every format: the ring copies planes 0, 1
+            // and 2 with each plane's own stride, which is the layout both
+            // YUV_420_888 and YCBCR_420_888 use.
+            val ok = frameRing.publish(image)
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
             val msg = t.message ?: ""
@@ -877,7 +875,7 @@ class RenderaOverlayService : Service() {
      * rather than retried into a path that cannot work.
      */
     private fun reportFormatRefusal(requested: Int, detail: String) {
-        val next = captureMode.ordinal + 1
+        val next = formatIndex + 1
         val named = formatName(requested)
         // Hoisted: the final report needs the list of what was tried, and scoping
         // it to the branch that advances left it undefined on the path that
@@ -886,7 +884,7 @@ class RenderaOverlayService : Service() {
         if (next < captureFormats.size) {
             Log.w(TAG, "$named refused on this device; trying ${formatName(captureFormats[next])}")
             runCatching { events.error("capture", "$named refused, trying the next format") }
-            captureMode = CaptureMode.entries[next]
+            formatIndex = next
             requestedFormat = 0
             // Deliberately not guarded by a "refused once" flag: each step is a
             // different format, and the last one failing is the real answer.
@@ -1492,7 +1490,6 @@ class RenderaOverlayService : Service() {
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
             while (isActive) {
-                val privateMode = captureMode == CaptureMode.PRIVATE
                 val frame = frameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)
@@ -1528,25 +1525,6 @@ class RenderaOverlayService : Service() {
                         val analysis = synchronized(detectorLock) {
                             if (frame == null) {
                                 null
-                            } else if (privateMode) {
-                                val f = frame
-                                // The RGBA plane only exists on an RGBA_8888
-                                // capture, so a null here is a mode mismatch and
-                                // not something to dereference blindly.
-                                val rgba = f.rgba
-                                if (rgba == null) {
-                                    null
-                                } else
-                                d.processRgba(
-                                    rgba = rgba,
-                                    rowStride = f.rgbaStride,
-                                    frameWidth = f.width,
-                                    frameHeight = f.height,
-                                    ptsNanos = System.nanoTime(),
-                                    screenWidth = displayWidth,
-                                    screenHeight = displayHeight,
-                                    collectDebug = prefs.debugOverlayEnabled.value
-                                )
                             } else {
                                 val f = frame
                                 d.process(
@@ -1853,8 +1831,7 @@ class RenderaOverlayService : Service() {
         // Armed but seeing nothing is a distinct state from armed and working,
         // and reporting both as "Armed" is why arming appeared to do nothing.
         if (framesAnalysed == 0L) {
-            val mode = formatName(requestedFormat)
-            return "No frames via $mode. ${lastFrameAge()}"
+            return "No frames via ${formatName(requestedFormat)}. ${lastFrameAge()}"
         }
         if (latestAnalysis?.playerDetected != true) {
             return "Armed, no player lock. Using the anchor."
@@ -2631,7 +2608,7 @@ class RenderaOverlayService : Service() {
             // This button previously looked broken because every failure looked
             // identical from the menu.
             val why = "no frame analysed yet " +
-                "(mode ${if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"}, " +
+                "(format ${formatName(requestedFormat)}, " +
                 "got ${framesReceived}, rejected ${framesRejected}, " +
                 "analysed ${framesAnalysed})"
             mainHandler.post {
