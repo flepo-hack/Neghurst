@@ -865,8 +865,11 @@ class RenderaOverlayService : Service() {
     private fun reportFormatRefusal(requested: Int, detail: String) {
         val next = captureMode.ordinal + 1
         val named = formatName(requested)
+        // Hoisted: the final report needs the list of what was tried, and scoping
+        // it to the branch that advances left it undefined on the path that
+        // gives up.
+        val tried = captureFormats.take(next + 1).joinToString(", ") { formatName(it) }
         if (next < captureFormats.size) {
-            val tried = (0..next).joinToString(", ") { formatName(captureFormats[it]) }
             Log.w(TAG, "$named refused on this device; trying ${formatName(captureFormats[next])}")
             runCatching { events.error("capture", "$named refused, trying the next format") }
             captureMode = CaptureMode.entries[next]
@@ -877,7 +880,7 @@ class RenderaOverlayService : Service() {
             imageReader = createImageReader()
             val replacement = imageReader
             if (replacement == null) {
-                startFailure = "Capture could not be started (tried $tried)."
+                startFailure = "Capture could not start. Tried $tried."
             } else {
                 runCatching {
                     virtualDisplay?.setSurface(replacement.surface)
