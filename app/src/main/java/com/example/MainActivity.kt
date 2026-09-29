@@ -245,6 +245,7 @@ class MainActivity : ComponentActivity() {
                 appendLine("Rendera ${BuildConfig.VERSION_NAME} on " +
                     "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, " +
                     "Android ${android.os.Build.VERSION.SDK_INT}")
+                appendLine("  capture format    ${status.captureFormat}")
                 appendLine("  service running    ${status.running}")
                 appendLine("  capture running    ${status.capturing}")
                 appendLine("  native engine      ${status.nativeAvailable}")
@@ -253,6 +254,7 @@ class MainActivity : ComponentActivity() {
                 appendLine("  target             ${status.targetPackage}")
                 appendLine("  foreground app     ${status.foregroundPackage}")
                 appendLine("  fps                ${status.fps}")
+                appendLine("  capture format    ${status.captureFormat}")
                 status.stopReason?.let { appendLine("  last stop reason   $it") }
                 if (!status.running) {
                     appendLine("  NOTE: 'native engine false' here just means the service is")

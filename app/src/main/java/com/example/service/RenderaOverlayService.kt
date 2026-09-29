@@ -116,6 +116,8 @@ import kotlinx.coroutines.launch
  */
 data class ServiceStatus(
     val running: Boolean = false,
+    /** The capture format in use, named. */
+    val captureFormat: String = "none",
     /** Why the service is not running, or null while it is. */
     val stopReason: String? = null,
     val capturing: Boolean = false,
@@ -400,6 +402,7 @@ class RenderaOverlayService : Service() {
     ) {
         _status.value = ServiceStatus(
             running = running,
+            captureFormat = formatName(requestedFormat),
             capturing = capturing,
             armed = armed && capturing,
             anchorsCalibrated = anchorsOk,
@@ -741,12 +744,7 @@ class RenderaOverlayService : Service() {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
             return null
         }
-        val format = if (captureMode == CaptureMode.PRIVATE) {
-            android.graphics.ImageFormat.PRIVATE
-        } else {
-            android.graphics.ImageFormat.YUV_420_888
-        }
-        requestedFormat = format
+        val format = captureFormats[captureMode.ordinal]
         return try {
             val reader = ImageReader.newInstance(captureWidth, captureHeight, format, 2)
             reader.setOnImageAvailableListener(
@@ -762,7 +760,35 @@ class RenderaOverlayService : Service() {
     }
 
     /** How the device chose to deliver frames. */
-    private enum class CaptureMode { YUV, PRIVATE }
+    private enum class CaptureMode { YUV, YCBCR, PRAGUE }
+
+    /**
+     * The formats to try, in order, with the value each one has.
+     *
+     * A display surface's supported formats are an OEM choice, and the framework
+     * only says "the producer's format does not match the reader's" without
+     * saying what it would have accepted. So the app walks a short list and
+     * records which one the device takes, once, instead of hard coding a guess
+     * and reporting a refusal nobody can act on.
+     *
+     *  - `YUV_420_888`   0x13 (19)  cheapest: planes already separated
+     *  - `YCBCR_420_888` 0x23 (35)  the value the test device named
+     *
+     * `RGBA_8888` is deliberately absent: its value is 1, which is also
+     * `ImageFormat.PRIVATE`, so a reader created with it is a PRIVATE reader and
+     * exposes no planes.
+     */
+    private val captureFormats = intArrayOf(
+        android.graphics.ImageFormat.YUV_420_888,
+        android.graphics.ImageFormat.YCBCR_420_888
+    )
+
+    private fun formatName(f: Int): String = when (f) {
+        android.graphics.ImageFormat.YUV_420_888 -> "YUV_420_888"
+        android.graphics.ImageFormat.YCBCR_420_888 -> "YCBCR_420_888"
+        android.graphics.ImageFormat.PRIVATE -> "PRIVATE"
+        else -> "0x" + Integer.toHexString(f)
+    }
 
     @Volatile
     private var captureMode = CaptureMode.YUV
@@ -796,7 +822,7 @@ class RenderaOverlayService : Service() {
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
             val msg = t.message ?: ""
-            if (captureMode == CaptureMode.YUV && msg.contains("buffer format")) {
+            if (msg.contains("buffer format") || msg.contains("format")) {
                 reportFormatRefusal(requestedFormat, msg)
             } else {
                 runCatching { events.error("capture", msg.take(120), t) }
@@ -837,12 +863,38 @@ class RenderaOverlayService : Service() {
      * rather than retried into a path that cannot work.
      */
     private fun reportFormatRefusal(requested: Int, detail: String) {
-        if (formatRefused) return
+        val next = captureMode.ordinal + 1
+        val named = formatName(requested)
+        if (next < captureFormats.size) {
+            val tried = (0..next).joinToString(", ") { formatName(captureFormats[it]) }
+            Log.w(TAG, "$named refused on this device; trying ${formatName(captureFormats[next])}")
+            runCatching { events.error("capture", "$named refused, trying the next format") }
+            captureMode = CaptureMode.entries[next]
+            requestedFormat = 0
+            // Deliberately not guarded by a "refused once" flag: each step is a
+            // different format, and the last one failing is the real answer.
+            val old = imageReader
+            imageReader = createImageReader()
+            val replacement = imageReader
+            if (replacement == null) {
+                startFailure = "Capture could not be started (tried $tried)."
+            } else {
+                runCatching {
+                    virtualDisplay?.setSurface(replacement.surface)
+                    old?.close()
+                }.onFailure { Log.e(TAG, "could not repoint the virtual display", it) }
+                startFailure = null
+            }
+            publishStatus(capturing = imageReader != null)
+            return
+        }
+        // Every documented format refused. Report exactly what was asked for, so
+        // the next report names the device's answer rather than a guess.
         formatRefused = true
-        val msg = "device refused 0x${Integer.toHexString(requested)}: $detail"
+        val msg = "no supported capture format: tried $tried, last refusal on $named: $detail"
         Log.e(TAG, msg)
         runCatching { events.error("capture", msg) }
-        startFailure = "This device refused the capture format."
+        startFailure = "This device refused every capture format."
         publishStatus(capturing = false, armed = false)
         mainHandler.post { toast("Screen capture format refused on this device") }
     }
@@ -1083,7 +1135,8 @@ class RenderaOverlayService : Service() {
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
-        val mode = "0x" + Integer.toHexString(requestedFormat)
+        val mode = formatName(requestedFormat) +
+            (if (requestedFormat == 0) "" else " (0x" + Integer.toHexString(requestedFormat) + ")")
         val suppressed = shouldSuppressDodge()
         val anchorsStale = anchors.calibrated &&
             anchors.calibratedForWidth != displayWidth
@@ -1783,7 +1836,7 @@ class RenderaOverlayService : Service() {
         // Armed but seeing nothing is a distinct state from armed and working,
         // and reporting both as "Armed" is why arming appeared to do nothing.
         if (framesAnalysed == 0L) {
-            val mode = if (captureMode == CaptureMode.PRIVATE) "PRIVATE" else "YUV"
+            val mode = formatName(requestedFormat)
             return "No frames via $mode. ${lastFrameAge()}"
         }
         if (latestAnalysis?.playerDetected != true) {
