@@ -261,6 +261,14 @@ class MainActivity : ComponentActivity() {
                     appendLine("  not running, not that the library failed to load.")
                 }
                 appendLine("  full log: ${log.absolutePath} (${log.length()} bytes)")
+                // A crash recorder writes here, because a crash is the one
+                // failure that leaves nothing else behind.
+                val crash = java.io.File(
+                    getExternalFilesDir(null) ?: filesDir, "rendera-crash.txt"
+                )
+                if (crash.exists() && crash.length() > 0) {
+                    appendLine("  crash log: ${crash.absolutePath} (${crash.length()} bytes)")
+                }
             }
             val report = DiagnosticsExport.buildReport(
                 summary,

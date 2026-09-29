@@ -141,6 +141,24 @@ path would have been, if one had worked.
 on any device.** It was not a tuning problem and not a device quirk: the format
 was never valid for an `ImageReader`.
 
+## 5c. If it crashes, the crash is recorded
+
+`RenderaApp` installs an uncaught exception handler that writes the thread, the
+exception, its cause chain and the first forty stack frames to
+`rendera-crash.txt` in the app's own external files directory - the same place
+`rendera-events.jsonl` goes - and *then* delegates to the previous handler, so
+the crash still looks like a crash.
+
+It is synchronous because after it returns the process is gone, and anything
+queued dies with it. `SEND DIAGNOSTICS` names the file in the shared report.
+
+This exists because the last report was a crash with nothing in the log: six
+`session` records and not one error, because whatever threw was outside every
+`try`/`catch` in the service. The capture callback, the failure reporting
+*inside* that callback, and the geometry change that re-points a live
+VirtualDisplay are now all contained, because a throw while describing a different
+throw is how the process dies with nothing to read.
+
 ## 6. The size question, answered once
 
 The APK is 19 MB. That is the three real ABIs (`arm64-v8a`, `armeabi-v7a`,

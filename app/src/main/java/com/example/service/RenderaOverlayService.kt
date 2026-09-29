@@ -334,8 +334,8 @@ class RenderaOverlayService : Service() {
                     startWithConsent(intent)
                 } catch (t: Throwable) {
                     Log.e(TAG, "Start failed", t)
-            events.error("start", t.message ?: "threw", t)
                     startFailure = "Start failed: ${t.javaClass.simpleName}: ${t.message}"
+                    runCatching { events.error("start", t.message ?: "threw", t) }
                     publishStatus(capturing = false, armed = false)
                     mainHandler.post { toast("Rendera could not start: ${t.message ?: t.javaClass.simpleName}") }
                 }
@@ -359,7 +359,12 @@ class RenderaOverlayService : Service() {
         // Rotation invalidates the capture geometry and, importantly, the
         // calibration: a stick at (0.17, 0.76) in landscape is not the same
         // physical location in portrait.
-        mainHandler.post { onGeometryChanged() }
+        mainHandler.post {
+            // A change here re-points a live VirtualDisplay, so a throw inside it
+            // leaves the display with a dead surface and the app with no frames.
+            runCatching { onGeometryChanged() }
+                .onFailure { Log.e(TAG, "geometry change failed", it) }
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -789,10 +794,9 @@ class RenderaOverlayService : Service() {
      * `ImageFormat.PRIVATE`, so a reader created with it is a PRIVATE reader and
      * exposes no planes.
      */
-    private val captureFormats = intArrayOf(FMT_JPEG)
+    private val captureFormats = intArrayOf(FMT_PRIVATE)
 
     private fun formatName(f: Int): String = when (f) {
-        FMT_JPEG -> "JPEG"
         FMT_PRIVATE -> "PRIVATE"
         else -> "0x" + Integer.toHexString(f)
     }
@@ -808,29 +812,38 @@ class RenderaOverlayService : Service() {
     /**
      * One frame from the reader.
      *
-     * A `YUV_420_888` reader is refused by some devices: the producer's format
-     * comes back `PRIVATE` (0x1) against a reader configured for 0x23, and
-     * `acquireLatestImage()` throws `UnsupportedOperationException` **on every
-     * frame**. Observed at over 1400 errors per second on one test device, with
-     * the capture looking healthy from the outside the whole time.
+     * `ImageReader` accepts a short list of formats and the obvious choice is not
+     * on it: `YUV_420_888` (19) and `YCBCR_420_888` (35) are camera and codec
+     * formats, and constructing a reader with either throws "Invalid format
+     * specified 19" immediately. `RGBA_8888` is 1, the same value as `PRIVATE`,
+     * so a reader built with it is a PRIVATE reader and exposes no planes. `JPEG`
+     * is accepted by `ImageReader` but a `VirtualDisplay` cannot render to a
+     * compressed format, and asking for one took the process down the moment the
+     * game opened.
      *
-     * So the first format mismatch switches the session to `PRIVATE` permanently
-     * and rebuilds the reader, rather than swallowing the exception and carrying on
-     * producing nothing.
+     * `PRIVATE` is therefore the only remaining option. Its pixels are reachable
+     * through the image itself, and every failure path drops the frame rather
+     * than throwing.
      */
     private fun onFrameAvailable(reader: ImageReader) {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            val ok = frameRing.publishJpeg(image)
+            val ok = frameRing.publishPrivateImage(image)
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
-            val msg = t.message ?: ""
-            if (msg.contains("buffer format") || msg.contains("format")) {
-                reportFormatRefusal(requestedFormat, msg)
-            } else {
-                runCatching { events.error("capture", msg.take(120), t) }
-            }
+            // Reporting a failure must not itself be able to throw. A throw
+            // while describing a different throw is how a process dies with
+            // nothing in the log, which is exactly what the last report was:
+            // six session records and not one error.
+            runCatching {
+                val msg = t.message ?: ""
+                if (msg.contains("format")) {
+                    reportFormatRefusal(requestedFormat, msg)
+                } else {
+                    events.error("capture", msg.take(120), t)
+                }
+            }.onFailure { Log.w(TAG, "reporting a capture failure failed", it) }
         } finally {
             runCatching { image?.close() }
         }
@@ -1481,6 +1494,9 @@ class RenderaOverlayService : Service() {
         if (visionJob?.isActive == true) return
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
+            // The loop body is wrapped below, but a failure anywhere in it -
+            // including the frame bookkeeping - must drop the frame and not the
+            // process.
             while (isActive) {
                 val frame = frameRing.take()
                 if (frame == null) {
