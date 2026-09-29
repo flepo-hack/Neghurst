@@ -115,6 +115,32 @@ re-deriving that mapping cost many sessions.
 
 ---
 
+## 5b. The capture format, settled by measurement
+
+`ImageReader` accepts a short list of formats, and `YUV_420_888` is **not on it**.
+An `ImageReader` built with 19 throws `IllegalArgumentException: Invalid format
+specified 19` the moment it is constructed. 19 is a camera and codec format.
+
+Of the accepted formats:
+
+- `PRIVATE` (1) exposes its pixels only through a hardware buffer type that is not
+  in the public SDK, so it cannot be read from a public-API app.
+- `RGBA_8888` is **also 1**, so a reader built with it is a PRIVATE reader with
+  no planes. That coincidence is a genuine trap.
+- the grayscale formats carry no colour, which is the one thing the player
+  detector needs.
+- `JPEG` (0x100) is accepted and publicly readable.
+
+So a MediaProjection capture on the public SDK is a JPEG stream that has to be
+decoded per frame. The engine then computes luma and both opponent signals
+directly from the interleaved RGBA, in one pass, with no colour space round trip
+at all - which makes the decoded path *cheaper* for this detector than a YUV
+path would have been, if one had worked.
+
+**This means the YUV plane path this project began with could never have worked
+on any device.** It was not a tuning problem and not a device quirk: the format
+was never valid for an `ImageReader`.
+
 ## 6. The size question, answered once
 
 The APK is 19 MB. That is the three real ABIs (`arm64-v8a`, `armeabi-v7a`,

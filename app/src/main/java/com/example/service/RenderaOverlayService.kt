@@ -151,17 +151,14 @@ class RenderaOverlayService : Service() {
         private const val NOTIFICATION_ID = 4711
 
         /**
-         * Long edge of the captured image, in pixels.
+         * Long edge of the capture.
          *
-         * This is the real resolution limit of the whole pipeline: the engine
-         * downsamples to a 200 wide grid, so the capture must be at least that
-         * wide or the downsample throws information away. 640 gives a 2400x1080
-         * display a 3.75x reduction, which leaves a Brawl Stars bullet about 7
-         * capture pixels across and therefore 2-3 grid cells: enough to survive
-         * the noise floor and the minimum blob area. YUV_420_888 requires even
-         * dimensions on both axes.
+         * 480 rather than 640: the capture is a JPEG now, so every frame is
+         * decoded, and decode cost scales with pixel count. The engine downsamples
+         * to its grid regardless, so the extra pixels of a larger capture buy no
+         * detection accuracy - only a slower decode.
          */
-        private const val CAPTURE_LONG_EDGE_EVEN = 640
+        private const val CAPTURE_LONG_EDGE_EVEN = 480
 
         private const val VISION_IDLE_SLEEP_MS = 4L
         private const val STATS_INTERVAL_MS = 1000L
@@ -179,8 +176,7 @@ class RenderaOverlayService : Service() {
          * `PRIVATE`, so a reader created with it is a PRIVATE reader and exposes
          * no planes, despite looking like the obvious choice.
          */
-        const val FMT_YUV_420_888 = 0x13
-        const val FMT_YCBCR_420_888 = 0x23
+        const val FMT_JPEG = 0x100
         const val FMT_PRIVATE = 0x01
 
         /**
@@ -793,11 +789,10 @@ class RenderaOverlayService : Service() {
      * `ImageFormat.PRIVATE`, so a reader created with it is a PRIVATE reader and
      * exposes no planes.
      */
-    private val captureFormats = intArrayOf(FMT_YUV_420_888, FMT_YCBCR_420_888)
+    private val captureFormats = intArrayOf(FMT_JPEG)
 
     private fun formatName(f: Int): String = when (f) {
-        FMT_YUV_420_888 -> "YUV_420_888"
-        FMT_YCBCR_420_888 -> "YCBCR_420_888"
+        FMT_JPEG -> "JPEG"
         FMT_PRIVATE -> "PRIVATE"
         else -> "0x" + Integer.toHexString(f)
     }
@@ -827,10 +822,7 @@ class RenderaOverlayService : Service() {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            // One publish path for every format: the ring copies planes 0, 1
-            // and 2 with each plane's own stride, which is the layout both
-            // YUV_420_888 and YCBCR_420_888 use.
-            val ok = frameRing.publish(image)
+            val ok = frameRing.publishJpeg(image)
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
             val msg = t.message ?: ""
@@ -1527,16 +1519,26 @@ class RenderaOverlayService : Service() {
                                 null
                             } else {
                                 val f = frame
-                                d.process(
-                                    yPlane = f.y, yStride = f.yStride,
-                                    uPlane = f.u, vPlane = f.v, uvStride = f.uvStride,
-                                    frameWidth = f.width, frameHeight = f.height,
-                                    chromaWidth = f.chromaWidth, chromaHeight = f.chromaHeight,
-                                    ptsNanos = System.nanoTime(),
-                                    screenWidth = displayWidth,
-                                    screenHeight = displayHeight,
-                                    collectDebug = prefs.debugOverlayEnabled.value
-                                )
+                                // The capture is JPEG, decoded by the ring into
+                                // interleaved RGBA, which the engine reads
+                                // directly: it computes luma and both opponent
+                                // signals from those bytes in one pass, so there
+                                // is no colour space round trip at all.
+                                val rgba = f.rgba
+                                if (rgba == null) {
+                                    null
+                                } else {
+                                    d.processRgba(
+                                        rgba = rgba,
+                                        rowStride = f.rgbaStride,
+                                        frameWidth = f.width,
+                                        frameHeight = f.height,
+                                        ptsNanos = System.nanoTime(),
+                                        screenWidth = displayWidth,
+                                        screenHeight = displayHeight,
+                                        collectDebug = prefs.debugOverlayEnabled.value
+                                    )
+                                }
                             }
                         }
                         if (analysis != null) {

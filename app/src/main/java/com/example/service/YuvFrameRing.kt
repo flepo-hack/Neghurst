@@ -1,5 +1,7 @@
 package com.example.service
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.Image
 import android.util.Log
 import java.nio.ByteBuffer
@@ -167,6 +169,104 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             return true
         }
     }
+
+    /**
+     * Decodes a `JPEG` capture frame into interleaved RGBA.
+     *
+     * `ImageReader` only accepts a short list of formats and `YUV_420_888` is not
+     * on it: an `ImageReader` built with 19 throws "Invalid format specified 19"
+     * immediately. Of the accepted formats, `PRIVATE` exposes its pixels only
+     * through a hardware buffer type the public SDK does not contain. JPEG is the
+     * one that is both accepted and publicly readable, so it is what a
+     * MediaProjection capture on the public SDK has to use.
+     *
+     * The decode costs a fraction of a millisecond at this capture size, against a
+     * few hundred microseconds of native analysis per frame. That is a real price
+     * and it is paid knowingly, because the alternative is no frames at all.
+     *
+     * The `Bitmap` here is a decode target, not a capture buffer: the plan
+     * originally forbade per frame `Bitmap` allocation to avoid GC churn, and a
+     * compressed decode cannot avoid it. It is recycled immediately and the
+     * pixels are copied into the reusable direct buffer, so nothing accumulates.
+     */
+    fun publishJpeg(image: Image): Boolean {
+        synchronized(lock) {
+            if (image.width != frameWidth || image.height != frameHeight || rgbaSlots.isEmpty()) {
+                rejectedFrames++
+                return false
+            }
+            val planes = image.planes
+            if (planes.isEmpty()) {
+                rejectedFrames++
+                return false
+            }
+            val idx = nextFreeSlot()
+            if (idx == null) {
+                rejectedFrames++
+                return false
+            }
+            val dst = rgbaSlots[idx]
+            if (dst == null) {
+                rejectedFrames++
+                return false
+            }
+            var bitmap: Bitmap? = null
+            try {
+                // A compressed reader hands over one plane holding the encoded
+                // bytes. Its rowStride is padded, so the tail after the last
+                // scanline is padding rather than data; decoders stop at the end
+                // of image anyway.
+                val plane = planes[0]
+                val src = plane.buffer
+                val len = minOf(src.remaining(), plane.rowStride * frameHeight)
+                if (len <= 0) {
+                    rejectedFrames++
+                    return false
+                }
+                val bytes = ByteArray(len)
+                src.position(0)
+                src.get(bytes, 0, len)
+                bitmap = BitmapFactory.decodeByteArray(bytes, 0, len, JPEG_OPTIONS)
+                val bmp = bitmap
+                if (bmp == null || bmp.width != frameWidth || bmp.height != frameHeight) {
+                    rejectedFrames++
+                    return false
+                }
+                // One reusable scratch array, grown only when the size changes.
+                if (scratchPixels.size < frameWidth * frameHeight) {
+                    scratchPixels = IntArray(frameWidth * frameHeight)
+                }
+                bmp.getPixels(scratchPixels, 0, frameWidth, 0, 0, frameWidth, frameHeight)
+                val out = dst.duplicate()
+                out.clear()
+                for (i in 0 until frameWidth * frameHeight) {
+                    // ARGB_8888 from getPixels is 0xAARRGGBB in int form; the
+                    // engine wants bytes as R, G, B, A.
+                    val argb = scratchPixels[i]
+                    val o = i shl 2
+                    out.put(o, (argb ushr 16).toByte())
+                    out.put(o + 1, (argb ushr 8).toByte())
+                    out.put(o + 2, argb.toByte())
+                    out.put(o + 3, (argb ushr 24).toByte())
+                }
+                dst.clear()
+            } catch (t: Throwable) {
+                Log.w("RenderaRing", "JPEG decode failed", t)
+                rejectedFrames++
+                return false
+            } finally {
+                bitmap?.recycle()
+            }
+            receivedRgba++
+            if (publishedSlot >= 0 && publishedSlot != idx) droppedFrames++
+            publishedSlot = idx
+            publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
+            return true
+        }
+    }
+
+    /** Reused between frames so decoding allocates once, not per frame. */
+    private var scratchPixels: IntArray = IntArray(0)
 
     /** Next slot the producer may write, skipping the consumer's slot. */
     private fun nextFreeSlot(): Int? {
@@ -374,5 +474,11 @@ class YuvFrameRing(private val poolSize: Int = 3) {
 
     private companion object {
         const val NO_FRAME = 0L
+
+        val JPEG_OPTIONS: BitmapFactory.Options = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inScaled = false
+            inMutable = false
+        }
     }
 }
