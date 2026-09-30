@@ -9,7 +9,7 @@
 
 #include <jni.h>
 
-#include <execinfo.h>
+#include <unwind.h>
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <unistd.h>
@@ -63,6 +63,20 @@ namespace {
 // handler reads it long after the JNI frame that set it is gone.
 char* gCrashPath = nullptr;
 
+struct UnwindState {
+    void* frames[24];
+    int count = 0;
+};
+
+_Unwind_Reason_Code unwindFrame(_Unwind_Context* ctx, void* arg) {
+    auto* st = static_cast<UnwindState*>(arg);
+    if (st->count >= 24) return _URC_END_OF_STACK;
+    const uintptr_t ip = _Unwind_GetIP(ctx);
+    if (ip == 0) return _URC_END_OF_STACK;
+    st->frames[st->count++] = reinterpret_cast<void*>(ip);
+    return _URC_NO_REASON;
+}
+
 void crashHandler(int sig, siginfo_t* info, void* ctx) {
     if (gCrashPath != nullptr && gCrashPath[0] != '\0') {
         int fd = ::open(gCrashPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -82,17 +96,20 @@ void crashHandler(int sig, siginfo_t* info, void* ctx) {
                 info != nullptr ? info->si_addr : nullptr, name,
                 static_cast<int>(::gettid()));
 
-            // Unwind a short frame list. Not async-signal-safe in the strict
-            // sense, and that is the deliberate trade: without the PCs the only
-            // thing a report can say is an address, and an address alone cannot
-            // be turned into a line of code. Written with write() immediately,
-            // before anything else can fault, and only on the path that is
+            // Unwind a short frame list. libunwind, not backtrace(): the latter
+            // is a glibc function and does not exist in the NDK's libc, which
+            // this file has to build against. Not async-signal-safe in the
+            // strict sense, and that is the deliberate trade: without the PCs a
+            // report can only give an address, and an address alone cannot be
+            // turned into a line of code. Written with write() immediately,
+            // before anything else can fault, and only on a path that is
             // already unwinding.
-            void* frames[24];
-            const int nFrames = ::backtrace(frames, 24);
+            UnwindState state;
+            _Unwind_Backtrace(unwindFrame, &state);
+            const int nFrames = state.count;
             for (int i = 0; i < nFrames && n > 0 && n < (int)sizeof(buf) - 24; ++i) {
                 n += std::snprintf(buf + n, sizeof(buf) - n, "%s\"%p\"",
-                                   i == 0 ? "" : ",", frames[i]);
+                                   i == 0 ? "" : ",", state.frames[i]);
             }
             if (n > 0 && n < (int)sizeof(buf) - 4) {
                 n += std::snprintf(buf + n, sizeof(buf) - n, "]}\n");
@@ -101,17 +118,20 @@ void crashHandler(int sig, siginfo_t* info, void* ctx) {
                 ssize_t ignored = ::write(fd, buf, static_cast<size_t>(n));
                 (void)ignored;
             }
-            // The load base, so a frame can be turned into a file and offset.
-            char maps[512];
-            int m = std::snprintf(maps, sizeof(maps), "{\"type\":\"maps\"}\n");
+            // The load bases, so a frame address can be turned into a file and
+            // an offset. Written as plain text under the JSON line rather than
+            // as JSON: /proc/self/maps is several kilobytes and parsing it in a
+            // signal handler is not worth it. A human reads this; a program does
+            // not.
+            static char maps[8192];
+            int m = std::snprintf(maps, sizeof(maps), "--- /proc/self/maps ---\n");
             if (m > 0) {
-                int mf = ::open("/proc/self/maps", O_RDONLY);
+                const int mf = ::open("/proc/self/maps", O_RDONLY);
                 if (mf >= 0) {
-                    // Only the library's own mapping is needed, and truncating a
-                    // maps dump mid-line is better than not writing it at all.
-                    ssize_t got = ::read(mf, maps + m, sizeof(maps) - m - 2);
+                    ssize_t got = ::read(mf, maps + m, sizeof(maps) - m - 1);
                     if (got > 0) {
-                        ssize_t w = ::write(fd, maps, static_cast<size_t>(m + got));
+                        const ssize_t w =
+                            ::write(fd, maps, static_cast<size_t>(m + got));
                         (void)w;
                     }
                     ::close(mf);
