@@ -658,14 +658,6 @@ class RenderaOverlayService : Service() {
     // -----------------------------------------------------------------------
 
     /**
-     * Registers the projection callback, then creates the reader and the virtual
-     * display.
-     *
-     * Order matters and is the single most important thing in this file: from
-     * API 34 the system rejects `createVirtualDisplay()` with
-     * `IllegalStateException` unless `registerCallback()` ran first.
-     */
-    /**
      * Acquires a projection and points it at a frame reader.
      *
      * ## Why this reports a step and not just "failed"
@@ -1044,11 +1036,6 @@ class RenderaOverlayService : Service() {
     @Volatile private var startFailure: String? = null
 
     /**
-     * Sends the user to the Activity, which is the only place a fresh
-     * MediaProjection consent dialog can be shown. On Android 14+ the token is
-     * single use, so this is not optional after any capture end.
-     */
-    /**
      * One compact line per interval, mirrored to a report file the user can read.
      *
      * The recurring problem with this project has been guessing which stage stopped.
@@ -1057,10 +1044,6 @@ class RenderaOverlayService : Service() {
      * from outside the app, and each was guessed at in turn. One line makes them
      * distinguishable, and the file means a report can be attached to a bug without a
      * cable. `adb logcat -s RenderaOverlay` shows the same lines.
-     */
-    /**
-     * Appends to a plain text report in the app's own files directory, rotated so it
-     * cannot grow without bound.
      */
     private fun appendReport(line: String) {
         try {
@@ -1073,6 +1056,16 @@ class RenderaOverlayService : Service() {
         }
     }
 
+    /**
+     * One compact line per interval, mirrored to a report file the user can read.
+     *
+     * The recurring problem with this project has been guessing which stage
+     * stopped. Frames never arriving, frames arriving and being rejected, frames
+     * analysed with no player lock, and a solved threat with no dispatch all look
+     * identical from outside the app, and each was guessed at in turn. One line
+     * makes them distinguishable, and the file means a report can be attached to a
+     * bug without a cable. `adb logcat -s RenderaOverlay` shows the same lines.
+     */
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
@@ -1112,6 +1105,11 @@ class RenderaOverlayService : Service() {
         appendReport(line)
     }
 
+    /**
+     * Sends the user to the Activity, which is the only place a fresh
+     * MediaProjection consent dialog can be shown. On Android 14+ the token is
+     * single use, so this is not optional after any capture end.
+     */
     private fun requestCaptureGrant() {
         val open = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -1129,12 +1127,10 @@ class RenderaOverlayService : Service() {
     }
 
     /**
-     * Resolves the real display size *including* rotation, from `DisplayManager`.
+     * Resolves the real display size, rotation applied, from `DisplayManager`.
+     *
      * `resources.displayMetrics` reports this service's own window, which is
      * wrong whenever the game is in split screen or freeform.
-     */
-    /**
-     * Resolves the real display size, rotation applied.
      *
      * @return true when a usable size was obtained. Callers must not proceed
      *         otherwise: a capture created against an unresolved size either
@@ -1720,6 +1716,14 @@ class RenderaOverlayService : Service() {
         Log.i(TAG, "stats: $state")
     }
 
+    /** How long ago the last frame was analysed, phrased for a human. */
+    private fun lastFrameAge(): String {
+        val t = lastFrameAtMs
+        if (t == 0L) return "capture has produced nothing"
+        val age = (SystemClock.elapsedRealtime() - t) / 1000L
+        return if (age < 2) "frames are arriving" else "no frame for ${age}s"
+    }
+
     /**
      * One line naming the FIRST thing that is wrong, in the order the stages
      * actually run.
@@ -1729,16 +1733,8 @@ class RenderaOverlayService : Service() {
      * simply never started. That single mislabelling is what sent the user - and
      * several sessions - looking for a missing library that was present and
      * loaded. Capture comes first because everything else depends on it, and the
-     * three "no engine" cases are now distinguished from each other.
+     * three "no engine" cases are distinguished from each other.
      */
-    /** How long ago the last frame was analysed, phrased for a human. */
-    private fun lastFrameAge(): String {
-        val t = lastFrameAtMs
-        if (t == 0L) return "capture has produced nothing"
-        val age = (SystemClock.elapsedRealtime() - t) / 1000L
-        return if (age < 2) "frames are arriving" else "no frame for ${age}s"
-    }
-
     private fun buildAdvice(): String {
         // Truncated: the panel shows three lines and a full sentence here
         // overflows it, which is what "the text comes out" was.
@@ -2622,7 +2618,6 @@ class RenderaOverlayService : Service() {
         }
     }
 
-    /** Reopens the menu carrying a specific reason, so a failure is readable. */
     /**
      * Runs a menu action, and never lets one take the app down.
      *

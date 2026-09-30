@@ -199,18 +199,13 @@ class ScreenThreatDetector(
     }
 
     /**
-     * Runs the pipeline on one captured frame.
-     *
-     * @param collectDebug when false, the debug readouts are not copied out.
-     *        Those copies allocate, so they are kept off the default path.
-     * @return null when native is unavailable or the frame was rejected.
-     */
-    /**
      * One analysed frame from the YUV_420_888 capture.
      *
      * The only pixel path. Luma and chroma arrive already separated, so there is
      * no interleave, no decode and no per-frame allocation.
      *
+     * @param collectDebug when false, the debug readouts are not copied out.
+     *        Those copies allocate, so they are kept off the default path.
      * @return null when native is unavailable or the frame was rejected.
      */
     fun process(
