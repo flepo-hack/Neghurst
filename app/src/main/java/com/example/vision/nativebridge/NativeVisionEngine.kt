@@ -20,7 +20,17 @@ class NativeVisionEngine(
     val gridWidth: Int = 200,
     val gridHeight: Int = 112,
     screenWidth: Int = 1080,
-    screenHeight: Int = 1920
+    screenHeight: Int = 1920,
+    /**
+     * Where the native signal handler should record a fault, or null to leave
+     * it uninstalled (a JVM test, or a host with no writable files dir).
+     *
+     * A segfault in the engine never reaches a Kotlin catch and never reaches
+     * `Thread.setDefaultUncaughtExceptionHandler`, so the process dies and the
+     * only trace left is a session line - indistinguishable from the app being
+     * killed by the system. This is the only way that fault becomes visible.
+     */
+    private val crashFile: String? = null
 ) : AutoCloseable {
 
     companion object {
@@ -78,6 +88,8 @@ class NativeVisionEngine(
 
     init {
         if (libraryLoaded) {
+            // Before the engine exists, so a fault in construction is recorded.
+            runCatching { nativeSetCrashFile(crashFile) }
             handle = nativeCreate(gridWidth, gridHeight, screenWidth, screenHeight)
             if (handle == 0L) {
                 Log.e(TAG, "nativeCreate returned a null handle")
@@ -209,6 +221,18 @@ class NativeVisionEngine(
     // -----------------------------------------------------------------------
     // JNI
     // -----------------------------------------------------------------------
+
+    /**
+     * Names the file the native signal handler writes to, and installs the
+     * handler. Must be called before any engine is created.
+     *
+     * A segfault in the engine never reaches a Kotlin catch and never reaches
+     * `Thread.setDefaultUncaughtExceptionHandler`, so the process simply dies
+     * and the only trace of it is a session line. This is the only way that
+     * fault becomes visible. A null path disables the handler.
+     */
+
+    private external fun nativeSetCrashFile(path: String?)
 
     private external fun nativeCreate(
         gridWidth: Int, gridHeight: Int, screenWidth: Int, screenHeight: Int

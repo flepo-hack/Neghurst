@@ -207,6 +207,9 @@ class RenderaOverlayService : Service() {
          */
         private const val MAX_IMAGES = 2
 
+        /** Where the native engine records a signal-level fault. */
+        private const val NATIVE_CRASH_FILE = "rendera-native-crash.txt"
+
         /**
          * How long the foreground app must disagree with the target before
          * dodging is suppressed. Long enough that no focus flap reaches it.
@@ -359,7 +362,9 @@ class RenderaOverlayService : Service() {
                 // report. A failure here is reported into the status and as a
                 // toast, and the service stays alive so the bubble still works.
                 try {
+                    runCatching { events.trace("start") }
                     startWithConsent(intent)
+                    runCatching { events.trace("start-returned") }
                 } catch (t: Throwable) {
                     Log.e(TAG, "Start failed", t)
                     startFailure = "Start failed: ${t.javaClass.simpleName}: ${t.message}"
@@ -485,6 +490,7 @@ class RenderaOverlayService : Service() {
      * can be shown.
      */
     private fun startWithConsent(intent: Intent?) {
+        runCatching { events.trace("consent:begin") }
         val gameName = intent?.getStringExtra(EXTRA_GAME_NAME) ?: "Universal"
         val pkg = intent?.getStringExtra(EXTRA_PACKAGE_NAME) ?: ""
         if (pkg.isNotEmpty() || gameName != "Universal") {
@@ -492,6 +498,7 @@ class RenderaOverlayService : Service() {
         }
 
         val alreadyCapturing = mediaProjection != null && virtualDisplay != null && !captureEnded
+        runCatching { events.trace("consent:before-fgs") }
 
         // startForeground MUST precede getMediaProjection() on API 29+, and it is
         // safe to call again.
@@ -560,9 +567,13 @@ class RenderaOverlayService : Service() {
         projectionStopHandled = false
         startFailure = null
         publishStatus(capturing = true)
+        runCatching { events.trace("consent:before-detector") }
         ensureDetector()
+        runCatching { events.trace("consent:after-detector") }
         showFloatingBubble()
+        runCatching { events.trace("consent:after-bubble") }
         startVisionLoop()
+        runCatching { events.trace("consent:after-vision") }
         // The game is launched from here, not from the Activity. By this point
         // the projection is live and this service holds the foreground, so the
         // process is still eligible for foreground work. See [launchTargetApp].
@@ -633,8 +644,11 @@ class RenderaOverlayService : Service() {
      * service, once the projection is live. See [launchTargetApp].
      */
     private fun startInForeground() {
+        runCatching { events.trace("fgs:before-notification") }
         val notification = buildNotification()
+        runCatching { events.trace("fgs:before-startForeground") }
         startForeground(NOTIFICATION_ID, notification)
+        runCatching { events.trace("fgs:after-startForeground") }
     }
 
     /**
@@ -646,11 +660,13 @@ class RenderaOverlayService : Service() {
      */
     private fun upgradeForegroundToMediaProjection() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        runCatching { events.trace("fgs:before-upgrade") }
         val notification = buildNotification()
         startForeground(
             NOTIFICATION_ID, notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         )
+        runCatching { events.trace("fgs:after-upgrade") }
     }
 
     private fun buildNotification(): Notification {
@@ -1319,7 +1335,14 @@ class RenderaOverlayService : Service() {
         if (detector != null) return
         if (displayWidth <= 0 || displayHeight <= 0) runCatching { resolveDisplayGeometry() }
         val (gw, gh) = ScreenThreatDetector.gridForCapture(captureWidth, captureHeight)
-        val d = ScreenThreatDetector(gw, gh, displayWidth, displayHeight)
+        // Named so a signal-level fault in the engine leaves a file instead of
+        // just a dead process. Installed by the engine before it is constructed.
+        val crashFile = runCatching {
+            java.io.File(getExternalFilesDir(null) ?: filesDir, NATIVE_CRASH_FILE)
+        }.getOrNull()
+        val d = ScreenThreatDetector(
+            gw, gh, displayWidth, displayHeight, crashFile?.absolutePath
+        )
         anchors = prefs.anchorsFor(displayWidth, displayHeight)
         synchronized(detectorLock) {
             d.setAnchors(anchors)

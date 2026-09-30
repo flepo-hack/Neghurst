@@ -136,6 +136,28 @@ class RenderaEventLog(appContext: Context) {
         write(o)
     }
 
+    /**
+     * Records that execution reached a named point, or that it did not.
+     *
+     * This exists because a process that dies leaves no error behind. Every
+     * catchable failure in this app is recorded by [error], so a report with
+     * session records and no error records means the process was killed by
+     * something that is not a Java exception - a native signal, or the system.
+     * The handshake that runs in that window is short, and a mark before and
+     * after each step turns "it died somewhere in there" into a line number.
+     *
+     * Kept out of [error] on purpose: these are not failures, and folding them
+     * into the error counters would make the summary count normal startup as a
+     * fault.
+     */
+    fun trace(step: String) {
+        val o = JSONObject()
+        o.put("type", "trace")
+        o.put("t", stamp())
+        o.put("step", step)
+        runCatching { write(o) }
+    }
+
     // -----------------------------------------------------------------------
     // Calibration
     // -----------------------------------------------------------------------

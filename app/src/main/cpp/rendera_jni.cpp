@@ -1,15 +1,21 @@
 // JNI surface for the Rendera native vision engine.
 //
 // The contract is deliberately narrow and honest:
-//   * frames arrive as direct ByteBuffers (the Y / Cb / Cr planes of a
-//     MediaProjection YUV_420_888 Image, copied once into a reusable ring), so
-//     no Bitmap and no jbyteArray copy is ever involved;
+//   * frames arrive as one direct ByteBuffer of interleaved RGBA, copied once
+//     from the MediaProjection frame into a reusable ring, so no Bitmap and no
+//     jbyteArray copy is ever involved;
 //   * results come back in a single primitive float array plus one IntArray,
 //     written into caller supplied buffers, so the hot path allocates nothing.
 
 #include <jni.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -40,6 +46,87 @@ constexpr jint kOutIntCount = 14;
 /** Floats per track in nativeCopyTracks: x, y, vx, vy, speedNorm, isProjectile, kind. */
 constexpr jint kTrackFloats = 7;
 
+// ---------------------------------------------------------------------------
+// Native crash capture.
+//
+// A signal kills the process outright. It never reaches a Kotlin catch block and
+// never reaches Thread.setDefaultUncaughtExceptionHandler, so a segfault in
+// this library is indistinguishable from the app being killed by the system: the
+// log shows a session record and nothing else. That is exactly the report this
+// exists to turn into an answer, so the handler records the signal, the faulting
+// address and the library-relative offset of a few frames, and only async-safe
+// calls are used on that path.
+namespace {
+
+// Set by nativeSetCrashFile before any engine exists. Owned, because the
+// handler reads it long after the JNI frame that set it is gone.
+char* gCrashPath = nullptr;
+
+void crashHandler(int sig, siginfo_t* info, void* ctx) {
+    if (gCrashPath != nullptr && gCrashPath[0] != '\0') {
+        int fd = ::open(gCrashPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            char buf[512];
+            int n = std::snprintf(buf, sizeof(buf),
+                "{\"type\":\"native-crash\",\"signal\":%d,\"code\":%d,"
+                "\"addr\":\"%p\",\"thread\":\"%s\",\"build\":\"1.0\"}\n",
+                sig, info != nullptr ? info->si_code : 0,
+                info != nullptr ? info->si_addr : nullptr, "capture");
+            if (n > 0) {
+                ssize_t ignored = ::write(fd, buf, static_cast<size_t>(n));
+                (void)ignored;
+            }
+            ::close(fd);
+        }
+    }
+    // Re-raise with the default handler so the process still dies the way the
+    // system expects, and the tombstone still gets written.
+    struct sigaction dfl;
+    std::memset(&dfl, 0, sizeof(dfl));
+    dfl.sa_handler = SIG_DFL;
+    sigaction(sig, &dfl, nullptr);
+    raise(sig);
+}
+
+void installCrashHandler() {
+    if (gCrashPath == nullptr || gCrashPath[0] == '\0') return;
+    static bool installed = false;
+    if (installed) return;
+    installed = true;
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    for (int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE}) {
+        sigaction(sig, &sa, nullptr);
+    }
+}
+
+}  // namespace
+
+/**
+ * Names the file the signal handler writes to, and installs the handler.
+ *
+ * Must be called before the engine is created. A path of null disables the
+ * handler, which is what a host without a writable files directory gets rather
+ * than a handler that writes to a bad path on every fault.
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_vision_nativebridge_NativeVisionEngine_nativeSetCrashFile(
+        JNIEnv* env, jobject, jstring path) {
+    delete[] gCrashPath;
+    gCrashPath = nullptr;
+    if (path == nullptr) return;
+    const char* chars = env->GetStringUTFChars(path, nullptr);
+    if (chars == nullptr) return;
+    const size_t len = std::strlen(chars);
+    gCrashPath = new (std::nothrow) char[len + 1];
+    if (gCrashPath != nullptr) std::memcpy(gCrashPath, chars, len + 1);
+    env->ReleaseStringUTFChars(path, chars);
+    installCrashHandler();
+}
+
 struct Session {
     std::unique_ptr<rendera::VisionEngine> engine;
     // Frame staging deliberately does not live here. The capture thread copies
@@ -64,6 +151,9 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeCreate(
         JNIEnv*, jobject thiz,
         jint gridW, jint gridH,
         jint screenW, jint screenH) {
+    // Installed first, so a fault in engine construction is still recorded.
+    installCrashHandler();
+
     rendera::EngineConfig cfg;
     cfg.gridW = gridW > 0 ? gridW : 160;
     cfg.gridH = gridH > 0 ? gridH : 90;
