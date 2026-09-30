@@ -72,23 +72,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/sanitizer
-          # The OpenCV seam is a no-op without the real library, but the engine
-          # links against it, so the definition it expects is provided here.
-          printf 'namespace rendera { bool opencvMotionDiffAvailable() { return false; } }\n' \
-            > build/sanitizer/opencv_stub.cpp
           COMMON=(
             -std=c++17 -O1 -g -fno-omit-frame-pointer
             -fsanitize=address,undefined
             -fno-sanitize-recover=undefined
             -Wall -Wextra -Wno-unused-parameter
           )
-          g++ "${COMMON[@]}" -c build/sanitizer/opencv_stub.cpp \
-            -I app/src/main/cpp -o build/sanitizer/opencv_stub.o
           g++ "${COMMON[@]}" \
             -I app/src/main/cpp \
             app/src/main/cpp/rendera_core.cpp \
             app/src/test/cpp/engine_sanitizer_main.cpp \
-            build/sanitizer/opencv_stub.o \
             -o build/sanitizer/engine_san
           ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 \
           UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
