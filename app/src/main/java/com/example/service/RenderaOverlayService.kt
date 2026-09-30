@@ -731,7 +731,9 @@ class RenderaOverlayService : Service() {
         // mediaProjection foreground type, and swallowing a failure here means
         // the next call throws with a message that points somewhere else entirely.
         try {
+            runCatching { events.trace("fgs:before-upgrade") }
             upgradeForegroundToMediaProjection()
+            runCatching { events.trace("fgs:after-upgrade") }
         } catch (t: Throwable) {
             fail("foreground",
                 "Foreground media projection refused: ${t.message ?: t.javaClass.simpleName}", t)
@@ -739,6 +741,7 @@ class RenderaOverlayService : Service() {
         }
 
         val projection: MediaProjection = try {
+            runCatching { events.trace("token:before-getMediaProjection") }
             mpm.getMediaProjection(resultCode, data)
                 ?: run { fail("get", "getMediaProjection returned null."); return false }
         } catch (t: Throwable) {
@@ -774,6 +777,7 @@ class RenderaOverlayService : Service() {
         imageReader = reader
 
         virtualDisplay = try {
+            runCatching { events.trace("vd:before-createVirtualDisplay") }
             projection.createVirtualDisplay(
                 "RenderaVision",
                 captureWidth,
