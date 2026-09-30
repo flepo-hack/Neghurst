@@ -552,6 +552,7 @@ class RenderaOverlayService : Service() {
             consentTokenSpent = false
         }
 
+        runCatching { events.trace("consent:before-setup") }
         if (!setupCapture(resultCode, data)) {
             // setupCapture has already named the step in the status. The only
             // thing left is to make sure the user can actually recover.
