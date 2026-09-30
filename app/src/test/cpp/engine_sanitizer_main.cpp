@@ -121,10 +121,17 @@ void run(rendera::VisionEngine& engine, Canvas& c, int frames, int gridW, int gr
         c.disc(px0, py0, 5.0f, 40, 245, 70);
 
         // Red projectiles crossing toward the player.
+        //
+        // 3 px per frame in capture space, which is 15 px per frame in screen
+        // space at this geometry, or 0.375 screen widths per second. The gate
+        // is 0.202. The previous 1.5 put them at 0.187 - below the gate by 7% -
+        // so nothing was ever classified as a projectile and a solver that works
+        // perfectly looked broken. A scene that sits just under a threshold
+        // measures the scene, not the code.
         for (int p = 0; p < 3; ++p) {
             const float tt = t * 3.0f + p * 90.0f;
-            const float bx = c.w * 0.9f - (tt * 1.5f) - p * 40.0f;
-            const float by = c.h * 0.30f + p * c.h * 0.12f;
+            const float bx = c.w * 0.9f - (tt * 3.0f) - p * 40.0f;
+            const float by = c.h * 0.60f + p * c.h * 0.02f;
             if (bx < -8.0f || bx > c.w + 8.0f) continue;
             c.disc(bx, by, 3.0f, 235, 60, 55);
         }
