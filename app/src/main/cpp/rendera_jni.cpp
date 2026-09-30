@@ -14,6 +14,8 @@
 #include <sys/prctl.h>
 #include <unistd.h>
 
+#include <cstdio>
+
 #include <algorithm>
 #include <csignal>
 #include <cstdio>
@@ -106,36 +108,90 @@ void crashHandler(int sig, siginfo_t* info, void* ctx) {
             // already unwinding.
             UnwindState state;
             _Unwind_Backtrace(unwindFrame, &state);
-            const int nFrames = state.count;
-            for (int i = 0; i < nFrames && n > 0 && n < (int)sizeof(buf) - 24; ++i) {
-                n += std::snprintf(buf + n, sizeof(buf) - n, "%s\"%p\"",
-                                   i == 0 ? "" : ",", state.frames[i]);
+
+            // Read the module map once, then translate every frame into
+            // "library+offset" before writing it.
+            //
+            // The previous version wrote raw PCs plus a truncated maps dump, and
+            // the truncation always cut off before librendera_native.so, so the
+            // report carried a fault address and nothing that could turn it into
+            // a line of code. Reading and scanning a static buffer is not
+            // async-signal-safe in the strict sense; that is the trade, and it is
+            // worth it because the alternative is a report nobody can act on.
+            static char maps[32768];
+            int mapLen = 0;
+            const int mf = ::open("/proc/self/maps", O_RDONLY);
+            if (mf >= 0) {
+                mapLen = static_cast<int>(
+                    ::read(mf, maps, sizeof(maps) - 1));
+                ::close(mf);
+                if (mapLen < 0) mapLen = 0;
             }
-            if (n > 0 && n < (int)sizeof(buf) - 4) {
+            if (mapLen >= 0 && mapLen < static_cast<int>(sizeof(maps))) {
+                maps[mapLen] = '\0';
+            }
+
+            int n = std::snprintf(buf, sizeof(buf),
+                "{\"type\":\"native-crash\",\"signal\":%d,\"code\":%d,"
+                "\"addr\":\"%p\",\"thread\":\"%s\",\"tid\":%d,"
+                "\"build\":\"1.0\",\"frames\":[",
+                sig, info != nullptr ? info->si_code : 0,
+                info != nullptr ? info->si_addr : nullptr, name,
+                static_cast<int>(::gettid()));
+
+            for (int i = 0; i < state.count && n > 0 &&
+                            n < static_cast<int>(sizeof(buf)) - 160; ++i) {
+                // Find the mapping containing this PC, and emit the module's
+                // base and the offset within it. Both ends of the subtraction
+                // come from the map, so no arithmetic on a possibly-wrapped
+                // pointer is involved.
+                const uintptr_t pc = reinterpret_cast<uintptr_t>(state.frames[i]);
+                uintptr_t base = 0;
+                const char* module = "?";
+                for (int off = 0; off < mapLen; ) {
+                    char* line = maps + off;
+                    char* nl = static_cast<char*>(std::memchr(line, '\n', mapLen - off));
+                    if (nl == nullptr) nl = maps + mapLen;
+                    uintptr_t lo = 0, hi = 0;
+                    if (std::sscanf(line, "%lx-%lx", &lo, &hi) == 2 &&
+                        pc >= lo && pc < hi) {
+                        const char* slash = nullptr;
+                        for (char* q = line; q < nl; ++q) {
+                            if (*q == '/') { slash = q; break; }
+                        }
+                        if (slash != nullptr) {
+                            // The base of the executable segment, which is what
+                            // the file offset in the map refers to. Adding the
+                            // in-file offset is what llvm-symbolizer wants.
+                            unsigned long long fileOff = 0;
+                            std::sscanf(line + 17, "%llx", &fileOff);
+                            base = lo - fileOff;
+                            module = slash;
+                        }
+                        break;
+                    }
+                    off = static_cast<int>(nl - maps) + 1;
+                }
+                const uintptr_t off = base != 0 ? pc - base : pc;
+                n += std::snprintf(buf + n, sizeof(buf) - n,
+                                   "%s{\"pc\":\"%p\",\"off\":\"0x%lx\","
+                                   "\"mod\":\"%s\"}",
+                                   i == 0 ? "" : ",", state.frames[i],
+                                   static_cast<unsigned long>(off), module);
+            }
+            if (n > 0 && n < static_cast<int>(sizeof(buf)) - 4) {
                 n += std::snprintf(buf + n, sizeof(buf) - n, "]}\n");
             }
             if (n > 0) {
                 ssize_t ignored = ::write(fd, buf, static_cast<size_t>(n));
                 (void)ignored;
             }
-            // The load bases, so a frame address can be turned into a file and
-            // an offset. Written as plain text under the JSON line rather than
-            // as JSON: /proc/self/maps is several kilobytes and parsing it in a
-            // signal handler is not worth it. A human reads this; a program does
-            // not.
-            static char maps[8192];
-            int m = std::snprintf(maps, sizeof(maps), "--- /proc/self/maps ---\n");
-            if (m > 0) {
-                const int mf = ::open("/proc/self/maps", O_RDONLY);
-                if (mf >= 0) {
-                    ssize_t got = ::read(mf, maps + m, sizeof(maps) - m - 1);
-                    if (got > 0) {
-                        const ssize_t w =
-                            ::write(fd, maps, static_cast<size_t>(m + got));
-                        (void)w;
-                    }
-                    ::close(mf);
-                }
+            // The full map alongside, for anything the scan above missed.
+            if (mapLen > 0) {
+                const char* header = "--- /proc/self/maps ---\n";
+                ssize_t ignored = ::write(fd, header, std::strlen(header));
+                ignored = ::write(fd, maps, static_cast<size_t>(mapLen));
+                (void)ignored;
             }
             ::close(fd);
         }
