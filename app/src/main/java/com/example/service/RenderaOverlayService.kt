@@ -1421,8 +1421,11 @@ class RenderaOverlayService : Service() {
                 }
                 try {
                     val d = detector
-                    val haveFrame = frameRing.width > 0
-                    if (d != null && haveFrame) {
+                    // A non-null frame is proof enough that the ring is
+                    // configured and a capture has landed: `take()` returns
+                    // null until both are true, so the old extra
+                    // `frameRing.width > 0` guard could only ever be redundant.
+                    if (d != null) {
                         // Re-read anchors and tuning when the user changes them,
                         // without a listener per write.
                         val liveAnchors = prefs.anchors.value
