@@ -188,16 +188,23 @@ class ObjectClassificationTest {
         // the honest outcome, and the direction that matters for safety is the
         // first loop: a clean fast straight mover is never anything but a
         // projectile, at any size.
-        for (area in listOf(6f, 20f)) {
+        //
+        // The boundary is read from the shipped threshold rather than written
+        // down, because the value it used to be written against (24) is not the
+        // value that ships (14). With the old literal this loop asserted that a
+        // 20-cell slow blob was UNKNOWN, which the real engine has called a BALL
+        // ever since the threshold was retuned.
+        val ball = tuning.ballMinArea
+        for (area in listOf(1f, ball - 1f)) {
             assertEquals(
-                "area $area, slow wandering mover",
+                "area $area, slow wandering mover, below the ball threshold",
                 TrackKind.UNKNOWN,
                 classify(areaEma = area, bounced = false, 0.2f, 0.1f)
             )
         }
-        for (area in listOf(30f, 40f, 60f)) {
+        for (area in listOf(ball, ball + 10f, ball + 30f)) {
             assertEquals(
-                "area $area, slow wandering mover",
+                "area $area, slow wandering mover, at or above the ball threshold",
                 TrackKind.BALL,
                 classify(areaEma = area, bounced = false, 0.2f, 0.1f)
             )
@@ -247,17 +254,17 @@ class ObjectClassificationTest {
             val d = Math.toRadians(obsDeg - predDeg)
             return Math.cos(d).toFloat()
         }
-        // Straight on: 1.0, far above the -0.55 threshold.
-        assertTrue(cosBetween(180.0, 180.0) > bouncerDotThreshold)
+        // Straight on: 1.0, far above the threshold.
+        assertTrue(cosBetween(180.0, 180.0) > tuning.bouncerDotThreshold)
         // Slight drift: still not a bounce.
-        assertTrue(cosBetween(180.0, 195.0) > bouncerDotThreshold)
+        assertTrue(cosBetween(180.0, 195.0) > tuning.bouncerDotThreshold)
         // Full reversal: -1.0, decisively a bounce.
-        assertTrue(cosBetween(180.0, 0.0) < bouncerDotThreshold)
+        assertTrue(cosBetween(180.0, 0.0) < tuning.bouncerDotThreshold)
         // Right angle bounce: 0.0, which is not a reversal but is a big change.
         // The threshold deliberately does not catch it, so a hard 90 degree
         // deflection is not mislabelled; that trades a missed label for not
         // mislabelling a genuinely curving projectile.
-        assertTrue(cosBetween(180.0, 90.0) > bouncerDotThreshold)
+        assertTrue(cosBetween(180.0, 90.0) > tuning.bouncerDotThreshold)
     }
 
     // -----------------------------------------------------------------------
