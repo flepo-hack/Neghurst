@@ -89,14 +89,7 @@ void crashHandler(int sig, siginfo_t* info, void* ctx) {
             char name[32] = {0};
             prctl(PR_GET_NAME, name, 0, 0, 0);
 
-            char buf[1024];
-            int n = std::snprintf(buf, sizeof(buf),
-                "{\"type\":\"native-crash\",\"signal\":%d,\"code\":%d,"
-                "\"addr\":\"%p\",\"thread\":\"%s\",\"tid\":%d,"
-                "\"build\":\"1.0\",\"frames\":[",
-                sig, info != nullptr ? info->si_code : 0,
-                info != nullptr ? info->si_addr : nullptr, name,
-                static_cast<int>(::gettid()));
+            char buf[2048];
 
             // Unwind a short frame list. libunwind, not backtrace(): the latter
             // is a glibc function and does not exist in the NDK's libc, which
