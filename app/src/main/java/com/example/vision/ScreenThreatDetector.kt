@@ -199,17 +199,14 @@ class ScreenThreatDetector(
     }
 
     /**
-     * Runs the pipeline on one captured frame.
+     * One analysed frame from the YUV_420_888 capture.
+     *
+     * The only pixel path. Luma and chroma arrive already separated, so there is
+     * no interleave, no decode and no per-frame allocation.
      *
      * @param collectDebug when false, the debug readouts are not copied out.
      *        Those copies allocate, so they are kept off the default path.
      * @return null when native is unavailable or the frame was rejected.
-     */
-    /**
-     * One analysed frame from a YUV capture.
-     *
-     * The cheaper path where it works: luma and chroma arrive already
-     * separated, so there is no interleaved copy to make.
      */
     fun process(
         yPlane: ByteBuffer,
@@ -237,37 +234,12 @@ class ScreenThreatDetector(
     }
 
     /**
-     * One analysed RGBA frame, from a `PRIVATE` capture.
-     *
-     * Luma and the opponent signals are computed natively in one pass over the
-     * interleaved bytes, so this path skips the YUV plane copy entirely.
-     */
-    fun processRgba(
-        rgba: java.nio.ByteBuffer,
-        rowStride: Int,
-        frameWidth: Int,
-        frameHeight: Int,
-        ptsNanos: Long,
-        screenWidth: Int,
-        screenHeight: Int,
-        collectDebug: Boolean = false
-    ): Analysis? {
-        val raw = engine.processRgbaResult(
-            rgba = rgba, rowStride = rowStride,
-            frameWidth = frameWidth, frameHeight = frameHeight, ptsNanos = ptsNanos
-        ) ?: return null
-        return processFrame(raw, screenWidth, screenHeight, collectDebug)
-    }
-
-    /**
      * Assembles an [Analysis] from a fresh engine result.
      *
-     * Shared by the YUV and RGBA capture paths so the threat geometry, the escape
-     * solve and the debug snapshots cannot drift between them. They are two ways
-     * of getting pixels in, not two analysers.
+     * Kept as a named step so the threat geometry, the escape solve and the debug
+     * snapshots cannot drift away from the engine's own numbers.
      */
-    private fun processFrame(
-        raw: com.example.vision.nativebridge.VisionResult,
+    private fun processFrame(        raw: com.example.vision.nativebridge.VisionResult,
         screenWidth: Int,
         screenHeight: Int,
         collectDebug: Boolean
