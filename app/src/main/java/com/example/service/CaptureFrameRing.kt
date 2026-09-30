@@ -1,6 +1,9 @@
 package com.example.service
 
+import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.media.Image
+import android.os.Build
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -23,15 +26,22 @@ import java.nio.ByteOrder
  * 19" when format 19 is perfectly valid and the producer is what disagrees. A
  * PRIVATE reader is the documented exemption: the image is acquired anyway.
  *
- * PRIVATE has a second catch, and it is the one that made this app show a
- * running capture and never detect anything. `ImageReader.newInstance` with four
- * arguments deliberately does **not** request `USAGE_CPU_READ_OFTEN` for a
- * PRIVATE reader - the platform comment says it "may not work, and is
- * inscrutable anyway" - so its buffer is allocated without CPU access and
- * `lock()` cannot produce pixels. The four-argument constructor is the trap; the
- * five-argument one takes an explicit usage, and
- * `USAGE_CPU_READ_OFTEN` is what makes the buffer mappable. That is the whole
- * difference between a capture that runs and a capture that sees.
+ * PRIVATE has two catches, and both of them have to be handled.
+ *
+ * First, `ImageReader.newInstance` with four arguments deliberately does **not**
+ * request `USAGE_CPU_READ_OFTEN` for a PRIVATE reader - the platform comment
+ * says it "may not work, and is inscrutable anyway" - so its buffer is
+ * allocated without CPU access. The four-argument constructor is the trap; the
+ * five-argument one takes an explicit usage, and `USAGE_CPU_READ_OFTEN` is what
+ * makes the buffer mappable at all.
+ *
+ * Second, and this is why an earlier attempt at this file never compiled:
+ * `HardwareBuffer.lock()`, `unlock()` and `rowStride` are all `@hide`. They are
+ * not in the public SDK, so Kotlin rejects them outright - there is no way to
+ * read a private image's bytes through them from an app. The public route is
+ * [Bitmap.wrapHardwareBuffer], which gives a bitmap that can be copied into CPU
+ * memory. That costs one full-frame copy per frame, which is why the rows are
+ * written straight into the pooled buffer rather than through an intermediate.
  *
  * ## Threading
  *
@@ -99,9 +109,10 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             if (width == frameWidth && height == frameHeight) return
             frameWidth = width
             frameHeight = height
-            // Pad the row to 16 bytes and keep it 64-byte aligned, which is what
-            // the gralloc allocator does and what the native gather wants.
-            rgbaStride = ((((width * 4) + 63) / 64) * 64)
+            // Exactly width * 4, no padding: copyPixelsToBuffer writes rows
+            // tightly packed, and a padded stride here would shift every row
+            // but the first. 4 bytes is the alignment the engine needs.
+            rgbaStride = width * 4
             slots = Array(poolSize) { allocate(rgbaStride * height) }
             borrowedSlot = -1
             publishedSlot = -1
@@ -126,13 +137,6 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             rejectedFrames++
             return false
         }
-        val buffer = image.hardwareBuffer
-        if (buffer == null) {
-            noBufferFrames++
-            rejectedFrames++
-            return false
-        }
-
         synchronized(lock) {
             val idx = nextFreeSlot() ?: return false
             if (idx == publishedSlot) {
@@ -140,37 +144,16 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
                 droppedFrames++
             }
             val dst = slots[idx] ?: return false
-            val rowBytes = frameWidth * 4
             val ok = try {
-                // `lock()` is what makes the pixels addressable, and `unlock()`
-                // has to happen on every path: holding it stalls the compositor,
-                // which is what makes a capture stutter the game it is watching.
-                val src = buffer.lock()
-                try {
-                    val limit = minOf(src.limit(), src.capacity())
-                    val needed = (frameHeight - 1) * buffer.rowStride + rowBytes
-                    if (limit < needed) {
-                        lockFailures++
-                        rejectedFrames++
-                        false
-                    } else {
-                        dst.clear()
-                        for (y in 0 until frameHeight) {
-                            val from = y * buffer.rowStride
-                            val to = y * rgbaStride
-                            val row = src.duplicate()
-                            row.position(from)
-                            row.limit(from + rowBytes)
-                            val out = dst.duplicate()
-                            out.position(to)
-                            out.limit(to + rowBytes)
-                            out.put(row)
-                        }
-                        dst.clear()
-                        true
-                    }
-                } finally {
-                    runCatching { buffer.unlock() }
+                // Image gained getHardwareBuffer() in API 28, and the reader
+                // that produces a CPU-mappable buffer needs API 29 anyway; the
+                // service refuses to start below that and says so.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                    noBufferFrames++
+                    rejectedFrames++
+                    false
+                } else {
+                    copyPixels(image, dst)
                 }
             } catch (t: Throwable) {
                 copyErrors++
@@ -178,12 +161,58 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
                 Log.w(TAG, "frame copy failed", t)
                 false
             }
-            if (!ok) return false
-
             observedFormat = image.format
             publishedSlot = idx
             publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
             return true
+        }
+    }
+
+    /**
+     * Moves one image's pixels into [dst].
+     *
+     * `HardwareBuffer.lock()` is @hide, so the public route is to wrap the
+     * buffer as a bitmap and copy it into CPU memory. `wrapHardwareBuffer` is
+     * zero-copy; the `copy` is not, and it is the one unavoidable per-frame
+     * allocation this path has. It is a 480x216 ARGB buffer, which is small
+     * enough that it is not worth a custom native path, and a custom one would
+     * mean reimplementing a locked, fence-aware read in C++ to avoid it.
+     *
+     * `ARGB_8888` bitmaps are stored as R,G,B,A bytes in memory, which is the
+     * order the engine's downsampler reads.
+     */
+    private fun copyPixels(image: Image, dst: ByteBuffer): Boolean {
+        val hb = image.hardwareBuffer
+        if (hb == null) {
+            noBufferFrames++
+            rejectedFrames++
+            return false
+        }
+        val wrapped = Bitmap.wrapHardwareBuffer(hb, SRGB)
+        // The hardware bitmap is a view on the capture buffer and must not be
+        // recycled: the image owns it. The software copy is ours.
+        val software = wrapped.copy(Bitmap.Config.ARGB_8888, false)
+        try {
+            if (software.width != frameWidth || software.height != frameHeight) {
+                rejectedFrames++
+                return false
+            }
+            // copyPixelsToBuffer writes rows tightly packed, so the pool stride
+            // has to be exactly width * 4 or every row after the first is read
+            // from the wrong offset.
+            dst.clear()
+            software.copyPixelsToBuffer(dst)
+            if (dst.position() < frameWidth * 4 * frameHeight) {
+                // Fewer bytes than the frame needs. Copying on would hand the
+                // engine a buffer that is silently short.
+                lockFailures++
+                rejectedFrames++
+                return false
+            }
+            dst.clear()
+            return true
+        } finally {
+            software.recycle()
         }
     }
 
@@ -257,6 +286,7 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     }
 
     private companion object {
+        val SRGB: ColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
         const val NO_FRAME = 0L
         const val TAG = "RenderaRing"
     }
