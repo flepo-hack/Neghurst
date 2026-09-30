@@ -188,7 +188,14 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             rejectedFrames++
             return false
         }
+        // wrapHardwareBuffer is declared @Nullable: it returns null when the
+        // buffer cannot be wrapped, which is a real outcome and not a crash.
         val wrapped = Bitmap.wrapHardwareBuffer(hb, SRGB)
+        if (wrapped == null) {
+            noBufferFrames++
+            rejectedFrames++
+            return false
+        }
         // The hardware bitmap is a view on the capture buffer and must not be
         // recycled: the image owns it. The software copy is ours.
         val software = wrapped.copy(Bitmap.Config.ARGB_8888, false)
