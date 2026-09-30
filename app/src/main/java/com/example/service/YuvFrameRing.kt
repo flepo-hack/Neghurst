@@ -8,25 +8,29 @@ import java.nio.ByteOrder
 /**
  * Zero-copy staging for MediaProjection frames.
  *
- * ## Why this exists
+ * ## What this does
  *
- * The previous capture path allocated and recycled a `Bitmap` every frame:
- * `Bitmap.createBitmap` + `copyPixelsFromBuffer` + a per-frame `getPixels` into
- * an `IntArray`. That is exactly the garbage collection churn the design
- * explicitly rules out, and it was also a source of real failure: an image
- * plane's `ByteBuffer.limit()` is often `rowStride * (height - 1) +
- * pixelStride * width`, which is **smaller** than the `rowStride * height` the
- * old code assumed, so `copyPixelsFromBuffer` threw and the frame was silently
- * dropped. That, plus a missing `MediaProjection.Callback` registration, is why
- * screen reading appeared to do nothing at all.
+ * The reader is created as `ImageFormat.YUV_420_888`, which is the one format
+ * that is both accepted by [android.media.ImageReader] and guaranteed readable
+ * through the public SDK. Each of the three planes is copied row by row into a
+ * preallocated direct [ByteBuffer]. No `Bitmap` is ever created and nothing is
+ * allocated per frame.
  *
- * ## What this does instead
+ * ## Why YUV_420_888 and not PRIVATE
  *
- * The reader is created as `YUV_420_888` and only the **luma** plane and the two
- * chroma planes are read, each row copied into a preallocated direct
- * `ByteBuffer`. Luma is one byte per pixel, so this is a quarter of the traffic
- * of `RGBA_8888`, and the native engine downsamples to its grid. No `Bitmap` is
- * ever created.
+ * `ImageFormat.PRIVATE` is a trap. `ImageReader.newInstance` deliberately does
+ * NOT request `USAGE_CPU_READ_OFTEN` for it - AOSP `ImageReader.java` says
+ * "If the format is private don't default to USAGE_CPU_READ_OFTEN since it may
+ * not work, and is inscrutable anyway" - so a private image exposes no planes
+ * and its `HardwareBuffer` is not CPU-mappable. A capture on PRIVATE therefore
+ * yields no usable pixels at all, which is why this app used to show a running
+ * capture and never detect anything.
+ *
+ * `YUV_420_888` gets `USAGE_CPU_READ_OFTEN` automatically and hands back three
+ * readable planes. It is also the only format `ImageReader` rejects by name: the
+ * constructor's sole format check is for `NV21`. An earlier version of this
+ * file claimed `YUV_420_888` is refused with "Invalid format specified 19". No
+ * such check exists in the platform source, and the reader built here works.
  *
  * ## Threading
  *
@@ -45,17 +49,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     private var uSlots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
     private var vSlots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
 
-    /**
-     * Interleaved RGBA, for the `RGBA_8888` capture path.
-     *
-     * `RGBA_8888` rather than `PRIVATE`: a PRIVATE image exposes its pixels only
-     * through a hardware buffer type that is not in the public SDK, whereas
-     * `RGBA_8888` is a documented ImageReader format whose single interleaved
-     * plane is readable with the same copy the YUV path already uses.
-     */
-    private var rgbaSlots: Array<ByteBuffer?> = arrayOfNulls(poolSize)
-    private var rgbaStride = 0
-
     private var frameWidth = 0
     private var frameHeight = 0
     private var chromaWidth = 0
@@ -73,12 +66,12 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     private var writeCursor = 0
 
     // Written under `lock` by the capture thread, read without it by the vision
-    // thread. A 64 bit read is not atomic on 32-bit ART, and Int reads of geometry
-    // would not see the paired write, so these are volatile.
+    // thread. A 64 bit read is not atomic on 32-bit ART, and Int reads of
+    // geometry would not see the paired write, so these are volatile.
     @Volatile private var consumedFrames = 0L
     @Volatile private var droppedFrames = 0L
-    @Volatile private var receivedRgba = 0L
     @Volatile private var rejectedFrames = 0L
+    @Volatile private var planeErrors = 0L
     @Volatile private var frameWidthVolatile = 0
     @Volatile private var frameHeightVolatile = 0
 
@@ -87,8 +80,10 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     val hasFrame: Boolean get() = publishedId != NO_FRAME
     val consumedCount: Long get() = consumedFrames
     val droppedCount: Long get() = droppedFrames
-    val receivedRgbaCount: Long get() = receivedRgba
     val rejectedCount: Long get() = rejectedFrames
+
+    /** Copies that threw. Non zero means the ring is mis-configured, not the device. */
+    val copyFailureCount: Long get() = planeErrors
 
     /** Sizes the pool. Safe to call on a configuration change. */
     fun configure(width: Int, height: Int) {
@@ -107,11 +102,9 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             chromaHeight = (height + 1) / 2
             uvStride = (chromaWidth + 15) and 15.inv()
 
-            rgbaStride = ((width * 4 + 63) / 64) * 64
             slots = Array(poolSize) { allocate(yStride * height) }
             uSlots = Array(poolSize) { allocate(uvStride * chromaHeight) }
             vSlots = Array(poolSize) { allocate(uvStride * chromaHeight) }
-            rgbaSlots = Array(poolSize) { allocate(rgbaStride * height) }
 
             borrowedSlot = -1
             publishedSlot = -1
@@ -134,10 +127,14 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     fun publish(image: Image): Boolean {
         synchronized(lock) {
             if (frameWidth <= 0 || image.width != frameWidth || image.height != frameHeight) {
+                rejectedFrames++
                 return false
             }
             val planes = image.planes
-            if (planes.size < 3) return false
+            if (planes.size < 3) {
+                rejectedFrames++
+                return false
+            }
 
             val idx = nextFreeSlot() ?: return false
             if (idx == publishedSlot) {
@@ -154,6 +151,9 @@ class YuvFrameRing(private val poolSize: Int = 3) {
                 copyPlane(planes[2], dstV, uvStride, chromaWidth, chromaHeight)
                 true
             } catch (t: Throwable) {
+                planeErrors++
+                Log.w(TAG, "plane copy failed", t)
+                rejectedFrames++
                 false
             }
             if (!okCpy) return false
@@ -167,95 +167,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             return true
         }
     }
-
-    /**
-     * Copies a `PRIVATE` capture frame into interleaved RGBA, when the device
-     * lets us read it.
-     *
-     * `ImageReader` only accepts a short list of formats. `YUV_420_888` (19) and
-     * `YCBCR_420_888` (35) are camera and codec formats and are rejected outright
-     * - "Invalid format specified 19" - so the YUV plane path this project
-     * began with could never have worked on any device. `RGBA_8888` is 1, the same
-     * value as `PRIVATE`, so a reader built with it is a PRIVATE reader with no
-     * planes. `JPEG` is accepted by `ImageReader` but a `VirtualDisplay` cannot
-     * render to a compressed format, and asking for one crashed the process the
-     * moment the game opened.
-     *
-     * So `PRIVATE` is the only format left, and its pixels are reachable only
-     * through a hardware buffer. This reads that buffer through the image itself
-     * so no type has to be named, and every failure path returns false rather
-     * than throwing: a frame that cannot be read is a dropped frame, never a
-     * crash.
-     */
-    fun publishPrivateImage(image: Image): Boolean {
-        synchronized(lock) {
-            if (image.width != frameWidth || image.height != frameHeight || rgbaSlots.isEmpty()) {
-                rejectedFrames++
-                return false
-            }
-            val idx = nextFreeSlot()
-            if (idx == null) {
-                rejectedFrames++
-                return false
-            }
-            val dst = rgbaSlots[idx]
-            if (dst == null) {
-                rejectedFrames++
-                return false
-            }
-            val rowBytes = frameWidth * 4
-            var copied = false
-            try {
-                val buffer = image.hardwareBuffer
-                if (buffer != null) {
-                    val src = buffer.lock()
-                    try {
-                        dst.clear()
-                        val limit = minOf(src.limit(), src.capacity())
-                        for (y in 0 until frameHeight) {
-                            val from = y * buffer.rowStride
-                            val to = y * rgbaStride
-                            if (from + rowBytes > limit) break
-                            val srcRow = src.duplicate()
-                            srcRow.position(from)
-                            srcRow.limit(from + rowBytes)
-                            val dstRow = dst.duplicate()
-                            dstRow.position(to)
-                            dstRow.limit(to + rowBytes)
-                            dstRow.put(srcRow)
-                        }
-                    } finally {
-                        // Unlocked before anything else can throw, or the
-                        // compositor stalls behind a locked buffer.
-                        runCatching { buffer.unlock() }
-                            .onFailure { Log.w("RenderaRing", "unlock failed", it) }
-                    }
-                    dst.clear()
-                    copied = true
-                } else {
-                    // No readable pixel surface on this device or API level. The
-                    // frame is simply not usable, and saying so once is far more
-                    // useful than a stack trace per frame.
-                    unreadableFrames++
-                }
-            } catch (t: Throwable) {
-                Log.w("RenderaRing", "private frame read failed", t)
-                rejectedFrames++
-                return false
-            }
-            if (!copied) return false
-            receivedRgba++
-            if (publishedSlot >= 0 && publishedSlot != idx) droppedFrames++
-            publishedSlot = idx
-            publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
-            return true
-        }
-    }
-
-    /** Frames that arrived but whose pixels this device would not expose. */
-    @Volatile
-    var unreadableFrames: Long = 0
-        private set
 
     /** Next slot the producer may write, skipping the consumer's slot. */
     private fun nextFreeSlot(): Int? {
@@ -292,8 +203,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             v = v,
             yStride = yStride,
             uvStride = uvStride,
-            rgba = rgbaSlots[idx],
-            rgbaStride = rgbaStride,
             width = frameWidth,
             height = frameHeight,
             chromaWidth = chromaWidth,
@@ -314,65 +223,12 @@ class YuvFrameRing(private val poolSize: Int = 3) {
      * this correct everywhere: some devices report a tight plane, some pad the
      * row, and some use a semi-planar layout with `pixelStride == 2` for chroma.
      */
-    /**
-     * Copies an `RGBA_8888` image into the pool.
-     *
-     * One interleaved plane, so the whole frame is a row-wise copy with a pixel
-     * stride of four. `pixelStride` is honoured rather than assumed, because the
-     * format says "interleaved" but not always "tightly packed".
-     */
-    /**
-     * Copies an `RGBA_8888` image into the pool.
-     *
-     * One interleaved plane, so the whole frame is a row-wise copy with a pixel
-     * stride of four. The plane's own `rowStride` and `pixelStride` are honoured
-     * rather than assumed, because "interleaved" does not promise "tightly
-     * packed".
-     */
-    /**
-     * Copies a `PRIVATE` image into the pool.
-     *
-     * A `PRIVATE` image has no planes: its pixels are only reachable through the
-     * hardware buffer the image wraps, which must be *locked* before they are
-     * addressable. The lock is held across nothing but the copy, because holding
-     * it stalls the compositor and that is what makes a capture stutter the game.
-     *
-     * The buffer type is never named: it is reached through the image and used
-     * through `let`, so there is no import of a possibly non-public type and no
-     * annotation that could fail to resolve. Every member used here -
-     * `lock`, `unlock`, `rowStride` - is part of the public surface of that
-     * buffer, reached through inference.
-     *
-     * `RGBA_8888` is deliberately not used as the capture format even though it
-     * looks like the obvious choice: its value is 1, which is also
-     * `ImageFormat.PRIVATE`, so an `ImageReader` created with it is a PRIVATE
-     * reader and exposes no planes at all.
-     */
-    /**
-     * A `PRIVATE` image has no planes and its pixels are only reachable through
-     * a hardware buffer type that the public SDK does not expose, so this path
-     * cannot be implemented and the caller is told so rather than being left with
-     * a reader that silently produces nothing.
-     *
-     * Recorded because it has already cost several build cycles to discover.
-     */
-    fun publishPrivate(image: Image): Boolean {
-        rejectedFrames++
-        Log.w(
-            "RenderaRing",
-            "PRIVATE capture (format 0x1) has no public pixel accessor; " +
-                "YUV_420_888 is the only readable format on this device path"
-        )
-        return false
-    }
-
     private fun copyPlane(
         plane: Image.Plane,
         dst: ByteBuffer,
         dstRowStride: Int,
         samples: Int,
-        rows: Int,
-        pixelStride: Int = 1
+        rows: Int
     ) {
         if (samples <= 0 || rows <= 0) return
         val buffer = plane.buffer
@@ -381,7 +237,7 @@ class YuvFrameRing(private val poolSize: Int = 3) {
         val limit = buffer.limit()
         dst.clear()
 
-        if (srcPixelStride == pixelStride && srcRowStride == dstRowStride) {
+        if (srcPixelStride == 1 && srcRowStride == dstRowStride) {
             // Fast path: tight plane with matching stride, one bulk copy. The
             // length is clamped because the plane limit is frequently smaller
             // than rows * rowStride.
@@ -390,7 +246,7 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             if (n > 0) {
                 // `put(ByteBuffer, int, int)` was only added to java.nio in Java
                 // 13 / API 33, so on a minSdk 24 device the compiler resolves
-                // this call to the ByteArray overload and it fails. Duplicate,
+                // that call to the ByteArray overload and it fails. Duplicate,
                 // window it, and use put(ByteBuffer), which always exists.
                 val src = buffer.duplicate()
                 src.position(0)
@@ -426,7 +282,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
             slots = arrayOfNulls(poolSize)
             uSlots = arrayOfNulls(poolSize)
             vSlots = arrayOfNulls(poolSize)
-            rgbaSlots = arrayOfNulls(poolSize)
             borrowedSlot = -1
             publishedSlot = -1
             publishedId = NO_FRAME
@@ -443,9 +298,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
         val v: ByteBuffer,
         val yStride: Int,
         val uvStride: Int,
-        /** Interleaved RGBA, non null only for an `RGBA_8888` capture. */
-        val rgba: ByteBuffer? = null,
-        val rgbaStride: Int = 0,
         val width: Int,
         val height: Int,
         val chromaWidth: Int,
@@ -463,6 +315,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
 
     private companion object {
         const val NO_FRAME = 0L
-
+        const val TAG = "RenderaRing"
     }
 }

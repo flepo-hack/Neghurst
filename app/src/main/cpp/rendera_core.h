@@ -397,18 +397,6 @@ public:
                    int fullW, int fullH, int chromaW, int chromaH,
                    uint64_t ptsNanos);
 
-    /**
-     * Feeds a frame as packed RGBA, which is what a PRIVATE-format capture
-     * actually delivers.
-     *
-     * Preferred over the YUV path when available, and not only because it is the
-     * format some devices insist on: converting to YUV first and back is a lossy
-     * round trip, whereas the opponent signals wanted by the player detector are
-     * simply channel comparisons in the source space. Luma and the two opponent
-     * scores are computed in one pass from the interleaved bytes.
-     */
-    bool ingestRgba(const uint8_t* rgba, int stride,
-                    int fullW, int fullH, uint64_t ptsNanos);
     // Run the full pipeline for the ingested frame. Call once per ingest.
     void process(uint64_t ptsNanos);
 
@@ -424,12 +412,16 @@ public:
     // Intentionally used by the zero-copy ingest fast path.
     uint8_t* lumaGrid() { return luma_.data(); }
 
-    // One-time capture geometry setup. Must be called before the first ingest so
-    // the downsample can avoid per-frame divisions and honour real plane strides.
-    void configureCapture(int capW, int capH, int capCW, int capCH,
-                          int yStride, int uvStride) {
+    /**
+     * One-time capture geometry setup. Must be called before the first ingest so
+     * the downsample can avoid per-frame divisions and honour real plane strides.
+     *
+     * Chroma dimensions are derived from the luma ones rather than passed in:
+     * every YUV_420_888 source is half resolution in both axes by definition, so
+     * accepting them as parameters only ever allowed the two to disagree.
+     */
+    void configureCapture(int capW, int capH, int yStride, int uvStride) {
         capW_ = capW; capH_ = capH;
-        capCW_ = capCW; capCH_ = capCH;
         capYStride_ = yStride; capUvStride_ = uvStride;
     }
 
@@ -455,8 +447,6 @@ public:
 
 private:
     // --- stages ---
-    void downsampleFromRgba(const uint8_t* rgba, int stride, int fullW, int fullH);
-
     void downsampleFromYuv(const uint8_t* y, int yStride,
                           const uint8_t* u, const uint8_t* v, int uvStride,
                           int fullW, int fullH, int chromaW, int chromaH);
@@ -500,7 +490,7 @@ private:
     int screenW_ = 1080, screenH_ = 1920;
 
     // Capture geometry, fixed at construction time by configureCapture().
-    int capW_ = 0, capH_ = 0, capCW_ = 0, capCH_ = 0, capYStride_ = 0, capUvStride_ = 0;
+    int capW_ = 0, capH_ = 0, capYStride_ = 0, capUvStride_ = 0;
 
     // Working grid buffers.
     std::vector<uint8_t> luma_;

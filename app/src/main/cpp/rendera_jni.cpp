@@ -359,40 +359,14 @@ static void writeResults(JNIEnv* env, rendera::VisionEngine* e,
 }
 
 /**
- * Feeds one RGBA frame, which is the format a PRIVATE capture actually
- * delivers.
+ * Feeds one YUV_420_888 frame: luma plus the two half-resolution chroma planes.
  *
- * Several devices - this one reports a producer format of 0x1, PRIVATE, against
- * a YUV_420_888 reader at 0x23 - refuse `acquireLatestImage()` outright, and they
- * do it on every single frame, so a YUV-only capture never produces a frame at
- * all. The engine is fed from a HardwareBuffer instead, and computes luma and the
- * opponent signals in one pass from the interleaved bytes, which is both faster
- * and more accurate than a YUV round trip.
+ * Chroma is optional on purpose. A frame that arrives without usable chroma still
+ * carries luma, and luma alone drives motion, the blob stage and the tracker; only
+ * the colour-based player and enemy discrimination degrades. Discarding the whole
+ * frame because a chroma buffer looked short would turn a partial degradation into
+ * a total one.
  */
-JNIEXPORT jint JNICALL
-Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcessRgba(
-        JNIEnv* env, jobject thiz, jlong handle,
-        jobject rgbaBuf, jint stride,
-        jint fullW, jint fullH, jlong ptsNanos,
-        jfloatArray outF, jintArray outI) {
-    rendera::VisionEngine* e = asEngine(handle);
-    if (e == nullptr) return -1;
-    if (rgbaBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
-
-    auto* src = static_cast<uint8_t*>(env->GetDirectBufferAddress(rgbaBuf));
-    jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
-    if (src == nullptr || stride <= 0) return 0;
-    const jlong needed = static_cast<jlong>(stride) * fullH;
-    if (cap > 0 && cap < needed) return 0;
-
-    if (!e->ingestRgba(src, stride, fullW, fullH, static_cast<uint64_t>(ptsNanos))) {
-        return 0;
-    }
-    e->process(static_cast<uint64_t>(ptsNanos));
-    writeResults(env, e, outF, outI);
-    return e->threat().valid ? 1 : 0;
-}
-
 JNIEXPORT jint JNICALL
 Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
         JNIEnv* env, jobject thiz, jlong handle,

@@ -153,10 +153,10 @@ class RenderaOverlayService : Service() {
         /**
          * Long edge of the capture.
          *
-         * 480 rather than 640: the capture is a JPEG now, so every frame is
-         * decoded, and decode cost scales with pixel count. The engine downsamples
-         * to its grid regardless, so the extra pixels of a larger capture buy no
-         * detection accuracy - only a slower decode.
+         * 480 rather than 640: the engine box-downsamples to its grid on ingest,
+         * so a larger capture buys no detection accuracy. What it does buy is
+         * per-frame memory traffic in the plane copies, the one cost that does
+         * scale with capture size.
          */
         private const val CAPTURE_LONG_EDGE_EVEN = 480
 
@@ -164,20 +164,32 @@ class RenderaOverlayService : Service() {
         private const val STATS_INTERVAL_MS = 1000L
 
         /**
-         * Capture format values, named rather than referenced.
+         * The one capture format this app uses: `ImageFormat.YUV_420_888`.
          *
-         * `ImageFormat.YUV_420_888` is in the public SDK, but `YCBCR_420_888` and
-         * `PRIVATE` are not - they cannot be named at all, which is the only reason
-         * these are numbers. All three are stable platform ABI constants, and
-         * they are exactly what the framework compares in its refusal message, so
-         * matching them precisely is the whole point.
+         * It is the only format that is both accepted by `ImageReader.newInstance`
+         * and readable through the public SDK. `ImageReader` validates width,
+         * height, maxImages and NV21 - there is no format whitelist and no
+         * "Invalid format specified" error; an earlier version of this file
+         * asserted there was, and built a dead-end capture path on that invented
+         * rule.
          *
-         * `RGBA_8888` is deliberately absent: its value is 1, the same as
-         * `PRIVATE`, so a reader created with it is a PRIVATE reader and exposes
-         * no planes, despite looking like the obvious choice.
+         * `ImageReader` also requests `USAGE_CPU_READ_OFTEN` for every format
+         * except `PRIVATE`, and a private image has no planes, so a PRIVATE
+         * capture yields no pixels at all through the SDK. That is the format
+         * this app used before, and it is why it captured frames but never
+         * detected anything.
          */
-        const val FMT_JPEG = 0x100
-        const val FMT_PRIVATE = 0x01
+        const val FMT_YUV_420_888 = 0x13
+
+        /** The format name, spelled out once. See [FMT_YUV_420_888]. */
+        const val CAPTURE_FORMAT_NAME = "YUV_420_888"
+
+        /**
+         * Buffers the reader may hold. Two is the documented minimum for a
+         * usable `ImageReader`, and it lets a frame be produced while the
+         * previous one is still being analysed.
+         */
+        private const val MAX_IMAGES = 2
 
         /**
          * How long the foreground app must disagree with the target before
@@ -420,7 +432,7 @@ class RenderaOverlayService : Service() {
     ) {
         _status.value = ServiceStatus(
             running = running,
-            captureFormat = formatName(requestedFormat),
+            captureFormat = CAPTURE_FORMAT_NAME,
             capturing = capturing,
             armed = armed && capturing,
             anchorsCalibrated = anchorsOk,
@@ -479,6 +491,7 @@ class RenderaOverlayService : Service() {
             if (bubbleView == null) showFloatingBubble()
             startVisionLoop()
             publishStatus(capturing = true)
+            launchTargetApp(pkg)
             mainHandler.post { toast("Watching ${pkg.ifEmpty { "the foreground app" }}") }
             return
         }
@@ -534,6 +547,10 @@ class RenderaOverlayService : Service() {
         ensureDetector()
         showFloatingBubble()
         startVisionLoop()
+        // The game is launched from here, not from the Activity. By this point
+        // the projection is live and this service holds the foreground, so the
+        // process is still eligible for foreground work. See [launchTargetApp].
+        launchTargetApp(pkg)
         mainHandler.post {
             prefs.setAutoDodge(true)
             autoDodgeArmed = true
@@ -555,34 +572,61 @@ class RenderaOverlayService : Service() {
     }
 
     /**
-     * Phase 1 of the foreground handshake: an untyped `startForeground`.
+     * Brings the target app to the front, from the service, once capture is live.
      *
-     * The ordering rules around `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION` have
-     * shifted across releases, and getting them wrong produces exactly the
-     * symptom this whole file exists to fix: a foreground service with a
-     * notification and no frames. Concretely:
+     * Best effort and silent on failure: the capture is the feature, and a user
+     * whose package refuses to start can always open the game themselves. What
+     * must not happen is the app being backgrounded before the foreground
+     * handshake completes, which is why this lives here and not in the Activity.
+     * An empty package means "Universal" - watch whatever is in front - and has
+     * nothing to launch.
+     */
+    private fun launchTargetApp(pkg: String) {
+        if (pkg.isEmpty()) return
+        runCatching {
+            val launch = packageManager.getLaunchIntentForPackage(pkg)
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(launch)
+            } else {
+                Log.w(TAG, "no launch intent for $pkg")
+            }
+        }.onFailure { Log.w(TAG, "could not launch $pkg", it) }
+    }
+
+    /**
+     * The foreground handshake.
      *
-     *  * a VirtualDisplay may only be created while the service is in the
-     *    foreground, so a plain `startForeground` must already have happened;
-     *  * the typed variant validates against a live MediaProjection token, whose
-     *    ordering relative to `startForeground` is not stable across API levels.
+     * `startForegroundService()` is asynchronous and `startForeground()` has to
+     * run within about five seconds of it, or the system kills the process with
+     * `ForegroundServiceDidNotStartInTimeException`. That is a real timing
+     * constraint, but it is not a reason to misdescribe the service type.
      *
-     * Doing the untyped call first and upgrading to the typed one **after** the
-     * token exists satisfies both constraints on every API level this app
-     * supports (24..36). It is deliberately not "clean" enough to collapse into
-     * one call.
+     * The type is declared once, in the manifest, as `mediaProjection`, and the
+     * 2-argument `startForeground` inherits it - AOSP substitutes the manifest
+     * type whenever the call does not name one. That is what has to happen
+     * first: from API 34 the platform validates the mediaProjection FGS type
+     * against a live token when the service is promoted, and refuses to hand a
+     * token to an app that does not already hold that type. So the typed call
+     * cannot wait for the token; the token waits for it.
+     *
+     * What must NOT happen is the app going to the background in between.
+     * Launching the game from the Activity the moment `startForegroundService`
+     * returns backgrounds the process while the service is still starting, and
+     * from API 31 that is a refused FGS start. So the game is launched by the
+     * service, once the projection is live. See [launchTargetApp].
      */
     private fun startInForeground() {
         val notification = buildNotification()
-        // Untyped: always accepted, and satisfies the "foreground before
-        // createVirtualDisplay" requirement.
         startForeground(NOTIFICATION_ID, notification)
     }
 
     /**
-     * Phase 2: upgrade the service to the media projection type, now that a
-     * MediaProjection token exists. See [startInForeground] for why this is a
-     * separate call.
+     * Re-asserts the type explicitly once a token exists.
+     *
+     * Redundant by construction, and kept for one reason: it is the call that
+     * fails loudly if the manifest type and the token ever disagree, and that is
+     * worth failing on. See [startInForeground].
      */
     private fun upgradeForegroundToMediaProjection() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
@@ -762,168 +806,45 @@ class RenderaOverlayService : Service() {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
             return null
         }
-        val format = captureFormats[formatIndex.coerceIn(0, captureFormats.lastIndex)]
         return try {
-            val reader = ImageReader.newInstance(captureWidth, captureHeight, format, 2)
+            val reader = ImageReader.newInstance(
+                captureWidth, captureHeight, FMT_YUV_420_888, MAX_IMAGES
+            )
             reader.setOnImageAvailableListener(
                 { r: ImageReader -> onFrameAvailable(r) },
                 captureHandler()
             )
             reader
         } catch (t: Throwable) {
-            Log.e(TAG, "ImageReader(${captureWidth}x$captureHeight, $format) failed", t)
+            Log.e(TAG, "ImageReader(${captureWidth}x$captureHeight, $CAPTURE_FORMAT_NAME) failed", t)
             runCatching { events.error("capture", "ImageReader: ${t.message}", t) }
             null
         }
     }
 
-    /** How the device chose to deliver frames. */
     /**
-     * The formats to try, in order, with the value each one has.
+     * One frame from the reader, copied into the ring.
      *
-     * A display surface's supported formats are an OEM choice, and the framework
-     * only says "the producer's format does not match the reader's" without
-     * saying what it would have accepted. So the app walks a short list and
-     * records which one the device takes, once, instead of hard coding a guess
-     * and reporting a refusal nobody can act on.
-     *
-     *  - `YUV_420_888`   0x13 (19)  cheapest: planes already separated
-     *  - `YCBCR_420_888` 0x23 (35)  the value the test device named
-     *
-     * `RGBA_8888` is deliberately absent: its value is 1, which is also
-     * `ImageFormat.PRIVATE`, so a reader created with it is a PRIVATE reader and
-     * exposes no planes.
-     */
-    private val captureFormats = intArrayOf(FMT_PRIVATE)
-
-    private fun formatName(f: Int): String = when (f) {
-        FMT_PRIVATE -> "PRIVATE"
-        else -> "0x" + Integer.toHexString(f)
-    }
-
-    /** Index into [captureFormats]; advanced on a format refusal. */
-    @Volatile
-    private var formatIndex = 0
-
-    /** The exact format value handed to the ImageReader, for the log. */
-    @Volatile
-    private var requestedFormat = 0
-
-    /**
-     * One frame from the reader.
-     *
-     * `ImageReader` accepts a short list of formats and the obvious choice is not
-     * on it: `YUV_420_888` (19) and `YCBCR_420_888` (35) are camera and codec
-     * formats, and constructing a reader with either throws "Invalid format
-     * specified 19" immediately. `RGBA_8888` is 1, the same value as `PRIVATE`,
-     * so a reader built with it is a PRIVATE reader and exposes no planes. `JPEG`
-     * is accepted by `ImageReader` but a `VirtualDisplay` cannot render to a
-     * compressed format, and asking for one took the process down the moment the
-     * game opened.
-     *
-     * `PRIVATE` is therefore the only remaining option. Its pixels are reachable
-     * through the image itself, and every failure path drops the frame rather
-     * than throwing.
+     * Every failure here drops a frame rather than propagating. The listener runs
+     * on the capture thread, where an escaping exception would kill the service
+     * and take the overlay with it - and reporting the failure must never be the
+     * thing that throws either, which is how a process dies leaving nothing but a
+     * handful of session records in the log.
      */
     private fun onFrameAvailable(reader: ImageReader) {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            val ok = frameRing.publishPrivateImage(image)
+            val ok = frameRing.publish(image)
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
-            // Reporting a failure must not itself be able to throw. A throw
-            // while describing a different throw is how a process dies with
-            // nothing in the log, which is exactly what the last report was:
-            // six session records and not one error.
             runCatching {
-                val msg = t.message ?: ""
-                if (msg.contains("format")) {
-                    reportFormatRefusal(requestedFormat, msg)
-                } else {
-                    events.error("capture", msg.take(120), t)
-                }
+                events.error("capture", (t.message ?: t.javaClass.simpleName).take(120), t)
             }.onFailure { Log.w(TAG, "reporting a capture failure failed", it) }
         } finally {
             runCatching { image?.close() }
         }
     }
-
-    /**
-     * Rebuilds the capture in `RGBA_8888` mode.
-     *
-     * The fallback for a device that refuses to deliver YUV to a virtual
-     * display, which it reports as "the producer output buffer format 0x1
-     * doesn't match the ImageReader's configured buffer format 0x23" on every
-     * single frame. `RGBA_8888` is a documented ImageReader format with one
-     * interleaved plane, and the engine already knows how to read interleaved
-     * bytes - it computes luma and both opponent signals from them directly,
-     * which is faster than the YUV path and more accurate, because the signals
-     * are channel comparisons in the source space instead of a BT.601 round trip.
-     *
-     * `PRIVATE` is deliberately not used: it exposes its pixels only through
-     * `android.hardware.HardwareBuffer`, which is not in the public SDK.
-     */
-    /**
-     * Records a format refusal once, naming the exact value requested.
-     *
-     * The device reported "the producer output buffer format 0x1 doesn't match
-     * the ImageReader's configured buffer format 0x23" more than 1400 times a
-     * second. 0x23 is not `ImageFormat.YUV_420_888`, which is 0x13, so the value
-     * that was actually handed to the reader is now recorded and reported: one
-     * line that says what was asked for and what came back, instead of a flood
-     * that buries everything else.
-     *
-     * A PRIVATE capture is the only other format a display surface offers, and it
-     * cannot be read with the public SDK - its pixels are reachable only through
-     * a hardware buffer type the SDK does not expose. So a refusal is reported
-     * rather than retried into a path that cannot work.
-     */
-    private fun reportFormatRefusal(requested: Int, detail: String) {
-        val next = formatIndex + 1
-        val named = formatName(requested)
-        // Hoisted: the final report needs the list of what was tried, and scoping
-        // it to the branch that advances left it undefined on the path that
-        // gives up.
-        val tried = captureFormats.take(next + 1).joinToString(", ") { formatName(it) }
-        if (next < captureFormats.size) {
-            Log.w(TAG, "$named refused on this device; trying ${formatName(captureFormats[next])}")
-            runCatching { events.error("capture", "$named refused, trying the next format") }
-            formatIndex = next
-            requestedFormat = 0
-            // Deliberately not guarded by a "refused once" flag: each step is a
-            // different format, and the last one failing is the real answer.
-            val old = imageReader
-            imageReader = createImageReader()
-            val replacement = imageReader
-            if (replacement == null) {
-                startFailure = "Capture could not start. Tried $tried."
-            } else {
-                runCatching {
-                    virtualDisplay?.setSurface(replacement.surface)
-                    old?.close()
-                }.onFailure { Log.e(TAG, "could not repoint the virtual display", it) }
-                startFailure = null
-            }
-            publishStatus(capturing = imageReader != null)
-            return
-        }
-        // Every documented format refused. Report exactly what was asked for, so
-        // the next report names the device's answer rather than a guess.
-        formatRefused = true
-        val msg = "no supported capture format: tried $tried, last refusal on $named: $detail"
-        Log.e(TAG, msg)
-        runCatching { events.error("capture", msg) }
-        startFailure = "This device refused every capture format."
-        publishStatus(capturing = false, armed = false)
-        mainHandler.post { toast("Screen capture format refused on this device") }
-    }
-
-    /** One refusal per session, so the log cannot flood again. */
-    @Volatile
-    private var formatRefused = false
-
-    private fun yuvRowStride(): Int = ((captureWidth + 15) / 16) * 16
 
     /** One HandlerThread for the plane copies, created on first use. */
     private fun captureHandler(): Handler {
@@ -1155,8 +1076,7 @@ class RenderaOverlayService : Service() {
     private fun logDiagnostics() {
         val sinceFrame = if (lastFrameAtMs == 0L) -1L
             else SystemClock.elapsedRealtime() - lastFrameAtMs
-        val mode = formatName(requestedFormat) +
-            (if (requestedFormat == 0) "" else " (0x" + Integer.toHexString(requestedFormat) + ")")
+        val mode = CAPTURE_FORMAT_NAME
         val suppressed = shouldSuppressDodge()
         val anchorsStale = anchors.calibrated &&
             anchors.calibratedForWidth != displayWidth
@@ -1184,7 +1104,7 @@ class RenderaOverlayService : Service() {
             " target=${prefs.targetPackage.value}" +
             " a11y=${RenderaAccessibilityService.isAvailable()}" +
             " mode=$mode" +
-            " rgbaGot=${frameRing.receivedRgbaCount}" +
+            " copyFails=${frameRing.copyFailureCount}" +
             " rejected=${frameRing.rejectedCount}" +
             " idle=${RenderaAccessibilityService.isIdle()}" +
             " dodges=$dodgeCount"
@@ -1535,26 +1455,25 @@ class RenderaOverlayService : Service() {
                                 null
                             } else {
                                 val f = frame
-                                // The capture is JPEG, decoded by the ring into
-                                // interleaved RGBA, which the engine reads
-                                // directly: it computes luma and both opponent
-                                // signals from those bytes in one pass, so there
-                                // is no colour space round trip at all.
-                                val rgba = f.rgba
-                                if (rgba == null) {
-                                    null
-                                } else {
-                                    d.processRgba(
-                                        rgba = rgba,
-                                        rowStride = f.rgbaStride,
-                                        frameWidth = f.width,
-                                        frameHeight = f.height,
-                                        ptsNanos = System.nanoTime(),
-                                        screenWidth = displayWidth,
-                                        screenHeight = displayHeight,
-                                        collectDebug = prefs.debugOverlayEnabled.value
-                                    )
-                                }
+                                // The capture is YUV_420_888 and the ring already
+                                // holds the three planes, so the engine ingests
+                                // them in place: no decode, no interleave, and no
+                                // copy beyond the single plane copy the ring made.
+                                d.process(
+                                    yPlane = f.y,
+                                    yStride = f.yStride,
+                                    uPlane = f.u,
+                                    vPlane = f.v,
+                                    uvStride = f.uvStride,
+                                    frameWidth = f.width,
+                                    frameHeight = f.height,
+                                    chromaWidth = f.chromaWidth,
+                                    chromaHeight = f.chromaHeight,
+                                    ptsNanos = System.nanoTime(),
+                                    screenWidth = displayWidth,
+                                    screenHeight = displayHeight,
+                                    collectDebug = prefs.debugOverlayEnabled.value
+                                )
                             }
                         }
                         if (analysis != null) {
@@ -1849,7 +1768,18 @@ class RenderaOverlayService : Service() {
         // Armed but seeing nothing is a distinct state from armed and working,
         // and reporting both as "Armed" is why arming appeared to do nothing.
         if (framesAnalysed == 0L) {
-            return "No frames via ${formatName(requestedFormat)}. ${lastFrameAge()}"
+            // Say which stage actually failed. "No frames" and "frames the
+            // engine rejected" look identical from the bubble, which is why this
+            // read as a dead feature rather than a problem.
+            val why = when {
+                framesReceived == 0L ->
+                    "The device is not sending frames. ${lastFrameAge()}"
+                frameRing.copyFailureCount > 0L ->
+                    "Frame copies are failing (${frameRing.copyFailureCount})."
+                else ->
+                    "Frames arrive but the engine rejected ${framesRejected}."
+            }
+            return "No detections. $why"
         }
         if (latestAnalysis?.playerDetected != true) {
             return "Armed, no player lock. Using the anchor."
@@ -2626,8 +2556,9 @@ class RenderaOverlayService : Service() {
             // This button previously looked broken because every failure looked
             // identical from the menu.
             val why = "no frame analysed yet " +
-                "(format ${formatName(requestedFormat)}, " +
+                "(format $CAPTURE_FORMAT_NAME, " +
                 "got ${framesReceived}, rejected ${framesRejected}, " +
+                "copy failures ${frameRing.copyFailureCount}, " +
                 "analysed ${framesAnalysed})"
             mainHandler.post {
                 Toast.makeText(this, why, Toast.LENGTH_LONG).show()

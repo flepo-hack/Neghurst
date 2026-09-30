@@ -351,9 +351,14 @@ class MainActivity : ComponentActivity() {
             return
         }
         startOverlayService(game.appName, game.packageName)
-        if (game.packageName.isNotEmpty()) {
-            appsRepo.launchApp(game.packageName)
-        }
+        // The game is NOT launched from here. `startForegroundService` is
+        // asynchronous, so launching the game the instant it returns backgrounds
+        // the process while the service is still starting. From Android 12 an FGS
+        // start from the background is refused, and the run dies with
+        // `ForegroundServiceDidNotStartInTimeException` - a crash that leaves
+        // nothing in the app's own log, which is exactly the report this fixes.
+        // RenderaOverlayService launches the game itself, once the projection is
+        // live and it holds the foreground.
     }
 
     /**
