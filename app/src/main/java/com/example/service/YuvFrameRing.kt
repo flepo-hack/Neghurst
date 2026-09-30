@@ -65,20 +65,13 @@ class YuvFrameRing(private val poolSize: Int = 3) {
     private var consumedId = NO_FRAME
     private var writeCursor = 0
 
-    // Written under `lock` by the capture thread, read without it by the vision
-    // thread. A 64 bit read is not atomic on 32-bit ART, and Int reads of
-    // geometry would not see the paired write, so these are volatile.
-    @Volatile private var consumedFrames = 0L
+    // Written under `lock` by the capture thread, read without it for
+    // diagnostics. A 64 bit read is not atomic on 32-bit ART, so these are
+    // volatile.
     @Volatile private var droppedFrames = 0L
     @Volatile private var rejectedFrames = 0L
     @Volatile private var planeErrors = 0L
-    @Volatile private var frameWidthVolatile = 0
-    @Volatile private var frameHeightVolatile = 0
 
-    val width: Int get() = frameWidthVolatile
-    val height: Int get() = frameHeightVolatile
-    val hasFrame: Boolean get() = publishedId != NO_FRAME
-    val consumedCount: Long get() = consumedFrames
     val droppedCount: Long get() = droppedFrames
     val rejectedCount: Long get() = rejectedFrames
 
@@ -93,8 +86,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
 
             frameWidth = width
             frameHeight = height
-            frameWidthVolatile = width
-            frameHeightVolatile = height
             // Pad strides to 16 bytes, matching what the hardware planes use and
             // keeping the native gather aligned.
             yStride = (width + 15) and 15.inv()
@@ -195,7 +186,6 @@ class YuvFrameRing(private val poolSize: Int = 3) {
         val v = vSlots[idx] ?: return null
         consumedId = publishedId
         borrowedSlot = idx
-        consumedFrames++
         Frame(
             id = publishedId,
             y = y,

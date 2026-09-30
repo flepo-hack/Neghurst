@@ -84,19 +84,4 @@ class InstalledAppsRepository(private val context: Context) {
                 .thenBy { it.appName.lowercase() }
         )
     }
-
-    fun launchApp(packageName: String): Boolean {
-        return try {
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(launchIntent)
-                true
-            } else {
-                false
-            }
-        } catch (e: Exception) {
-            false
-        }
-    }
 }
