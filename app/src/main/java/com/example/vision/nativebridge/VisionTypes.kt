@@ -54,7 +54,6 @@ data class VisionTuning(    val motionMaxShiftHalfRes: Int = 24,
     val maxTracks: Int = 16,
     val maxObservations: Int = 48,
     val ballMinArea: Int = 14,
-    val bouncerMaxArea: Int = 26,
     val bouncerDotThreshold: Float = -0.55f,
     val kindMinHitsBeforeLabelling: Int = 3,
     val trackGatePixels: Float = 90f,
@@ -115,7 +114,6 @@ data class VisionTuning(    val motionMaxShiftHalfRes: Int = 24,
         dst[i++] = maxTracks.toFloat()
         dst[i++] = maxObservations.toFloat()
         dst[i++] = ballMinArea.toFloat()
-        dst[i++] = bouncerMaxArea.toFloat()
         dst[i++] = bouncerDotThreshold
         dst[i++] = kindMinHitsBeforeLabelling.toFloat()
         dst[i++] = trackGatePixels
@@ -188,7 +186,6 @@ data class VisionTuning(    val motionMaxShiftHalfRes: Int = 24,
         "maxTracks",
         "maxObservations",
         "ballMinArea",
-        "bouncerMaxArea",
         "bouncerDotThreshold",
         "kindMinHitsBeforeLabelling",
         "trackGatePixels",

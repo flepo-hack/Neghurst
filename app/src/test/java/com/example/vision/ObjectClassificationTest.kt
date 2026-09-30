@@ -1,6 +1,7 @@
 package com.example.vision
 
 import com.example.vision.nativebridge.TrackKind
+import com.example.vision.nativebridge.VisionTuning
 import com.example.vision.nativebridge.toTrackReadings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -95,13 +96,23 @@ class ObjectClassificationTest {
     }
 
     // -----------------------------------------------------------------------
-    // Classification rules, expressed directly so they can be reasoned about
-    // without a frame buffer. These mirror the engine's thresholds exactly.
+    // Classification rules, as a model.
+    //
+    // ## What this is and is not
+    //
+    // A JVM unit test cannot load `librendera_native.so`, so the rules below are
+    // a transcription of the engine's, not the engine. That is fine for the
+    // property being pinned here - "a label cannot cost a dodge" - because that
+    // property is about the shape of the rule and holds whatever the thresholds
+    // are. What it must NOT do is carry its own copy of the thresholds and call
+    // them a mirror, because a copy drifts silently. The previous version did
+    // exactly that: it hard coded `ballMinArea = 24f` while the shipped tuning
+    // said 14, so it asserted that a 20-cell slow blob is UNKNOWN when the real
+    // engine calls it a BALL. Every threshold is now read from [tuning], so a
+    // change to the shipped defaults shows up here as a failing test.
     // -----------------------------------------------------------------------
 
-    private val ballMinArea = 24f
-    private val bouncerMaxArea = 16f
-    private val bouncerDotThreshold = -0.55f
+    private val tuning = VisionTuning()
 
     /**
      * The engine's label rule, transcribed so a test can drive it.
@@ -123,13 +134,13 @@ class ObjectClassificationTest {
         bounced: Boolean,
         straightness: Float,
         speedNorm: Float,
-        projectileMinSpeedNorm: Float = 0.22f,
-        projectileMinStraightness: Float = 0.55f
+        projectileMinSpeedNorm: Float = tuning.projectileMinSpeedNorm,
+        projectileMinStraightness: Float = tuning.projectileMinStraightness
     ): TrackKind = when {
         bounced -> TrackKind.BOUNCER
         straightness >= projectileMinStraightness &&
             speedNorm >= projectileMinSpeedNorm -> TrackKind.PROJECTILE
-        areaEma >= ballMinArea -> TrackKind.BALL
+        areaEma >= tuning.ballMinArea -> TrackKind.BALL
         else -> TrackKind.UNKNOWN
     }
 
@@ -200,7 +211,9 @@ class ObjectClassificationTest {
         // Transcribed from the engine's updateTracks on purpose - if someone ever
         // makes the label gate threat detection, this test should say so.
         val isProjectile = { hits: Int, speedNorm: Float, straightness: Float ->
-            hits >= 3 && speedNorm >= 0.22f && straightness >= 0.55f
+            hits >= tuning.trackMinHitsForProjectile &&
+                speedNorm >= tuning.projectileMinSpeedNorm &&
+                straightness >= tuning.projectileMinStraightness
         }
         assertEquals(TrackKind.PROJECTILE, classify(40f, false, 0.9f, 0.6f))
         assertTrue(
@@ -212,17 +225,19 @@ class ObjectClassificationTest {
     }
 
     @Test
-    fun `the ball threshold is above any plausible projectile size`() {
-        // A bullet's motion residual is a few cells; the ball is a large rolling
-        // sphere. If these ever crossed, bullets would be reported as balls and
-        // the dodge path would lose them.
-        // The bands must not overlap, and the ball band must sit above any
-        // plausible bullet size.
+    fun `the ball threshold is a usable size band`() {
+        // The ball is the last resort after motion has already claimed the
+        // projectiles, so this number only has to be large enough that a small
+        // slow blob is not called a ball, and small enough that a big one still
+        // is. It gates nothing else.
         assertTrue(
-            "bullet band $bouncerMaxArea must be below the ball band $ballMinArea",
-            bouncerMaxArea < ballMinArea
+            "ballMinArea ${tuning.ballMinArea} must leave room below it for small blobs",
+            tuning.ballMinArea > 4
         )
-        assertTrue("ball", ballMinArea >= 20f)
+        assertTrue(
+            "ballMinArea ${tuning.ballMinArea} must be reachable within the grid",
+            tuning.ballMinArea < 256
+        )
     }
 
     @Test

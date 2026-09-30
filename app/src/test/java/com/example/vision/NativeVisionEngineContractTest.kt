@@ -146,7 +146,6 @@ class NativeVisionEngineContractTest {
         assertEquals(t.ownEffectTrackNorm, at("ownEffectTrackNorm"), 1e-6f)
         assertEquals(t.ownEffectMinHits.toFloat(), at("ownEffectMinHits"), 1e-6f)
         assertEquals(t.ballMinArea.toFloat(), at("ballMinArea"), 1e-6f)
-        assertEquals(t.bouncerMaxArea.toFloat(), at("bouncerMaxArea"), 1e-6f)
         assertEquals(t.bouncerDotThreshold, at("bouncerDotThreshold"), 1e-6f)
         assertEquals(t.kindMinHitsBeforeLabelling.toFloat(), at("kindMinHitsBeforeLabelling"), 1e-6f)
         assertEquals(t.trackGatePixels, at("trackGatePixels"), 1e-6f)

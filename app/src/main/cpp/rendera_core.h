@@ -154,13 +154,15 @@ struct EngineConfig {
     // Grid cells. A bullet is a few cells across once the motion residual has
     // eaten its tail; the ball is a large blob because it is a big rolling
     // sphere, not a sprite the size of a bullet.
-    // A bullet's motion residual is a few cells; the ball is a large rolling
-    // sphere. The bands are kept apart so the two numbers stay meaningful as
-    // documentation of what each one is for. They are NOT a safety boundary:
-    // `kind` never gates the collision solve, so no label can cost a dodge.
-    // ballMinArea > bouncerMaxArea is asserted by ObjectClassificationTest.
+    //
+    // This is a HUD label only. `kind` never gates the collision solve, so no
+    // label can cost a dodge - which is why there is no matching upper size
+    // bound here. There used to be a `bouncerMaxArea` and a comment claiming an
+    // ObjectClassificationTest asserted `bouncerMaxArea < ballMinArea`; the
+    // engine never read that field at all, the test asserted its own local
+    // constants rather than the shipped ones, and the values that actually ship
+    // violated the claimed order. All three are gone rather than papered over.
     int ballMinArea = 24;
-    int bouncerMaxArea = 16;
     // A bouncer reverses hard: the new velocity is nearly anti-parallel to the
     // previous one. A straight shot never does that by accident.
     float bouncerDotThreshold = -0.55f;
