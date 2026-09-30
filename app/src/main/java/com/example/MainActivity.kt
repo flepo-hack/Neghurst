@@ -283,6 +283,16 @@ class MainActivity : ComponentActivity() {
                 appendLine("  full log: ${log.absolutePath} (${log.length()} bytes)")
                 // A crash recorder writes here, because a crash is the one
                 // failure that leaves nothing else behind.
+                // A native fault never reaches the Java handler, so it has its
+                // own file. Without this a segfault in the engine and the app
+                // being killed by the system look identical from outside.
+                val native = java.io.File(
+                    getExternalFilesDir(null) ?: filesDir, "rendera-native-crash.txt"
+                )
+                if (native.exists() && native.length() > 0) {
+                    appendLine("  native crash: ${native.absolutePath}")
+                    appendLine("  " + native.readText().trim())
+                }
                 val crash = java.io.File(
                     getExternalFilesDir(null) ?: filesDir, "rendera-crash.txt"
                 )
