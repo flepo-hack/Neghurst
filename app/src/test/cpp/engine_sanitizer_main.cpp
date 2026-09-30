@@ -27,6 +27,7 @@
 // Kotlin classification test made. The contract is: it runs, it does not
 // misbehave, and the sanitizers stay quiet.
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
