@@ -181,7 +181,8 @@ def structural_braces(path: pathlib.Path) -> list[tuple[int, str]]:
     return out
 
 
-def main() -> int:
+def main():
+    root = pathlib.Path(__file__).resolve().parents[2]
     if not HEADER.exists():
         print(f"::error::{HEADER} not found")
         return 1
@@ -380,6 +381,30 @@ def main() -> int:
                 f"{path}: braces do not balance (final depth {depth}, lowest "
                 f"{lowest}); a closing brace is missing or extra"
             )
+
+    # Every out-of-line member definition must have a declaration in the header.
+    # clang only reaches this after a full NDK configure and a compile, and it
+    # reports it as "out-of-line definition does not match any declaration" for
+    # the definition plus a separate "no member named" for every caller, which
+    # reads like two unrelated problems. A missing declaration is a header and a
+    # .cpp that drifted apart, and it is checkable by reading.
+    header = (root / "app/src/main/cpp/rendera_core.h").read_text()
+    declared = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", header))
+    for cpp in sorted((root / "app/src/main/cpp").glob("*.cpp")):
+        for m in re.finditer(
+            r"\b(?:[A-Za-z_][\w:<>,\s\*&]*?)\b([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\(",
+            cpp.read_text(),
+        ):
+            cls, method = m.group(1), m.group(2)
+            if cls not in declared:
+                continue  # not one of our own classes
+            if method in ("VisionEngine", "EngineConfig"):
+                continue  # a constructor
+            if method not in declared:
+                findings.append(
+                    f"{cpp.relative_to(root)}: {cls}::{method} is defined but "
+                    f"never declared in rendera_core.h"
+                )
 
     if findings:
         seen = set()

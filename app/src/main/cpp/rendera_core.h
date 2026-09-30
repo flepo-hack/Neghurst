@@ -388,6 +388,26 @@ public:
     explicit VisionEngine(const EngineConfig& cfg);
 
 
+    /**
+     * Ingests one frame as interleaved RGBA, the format a MediaProjection virtual
+     * display produces.
+     *
+     * Not a fallback. `ImageReader` refuses to hand out an image whose format
+     * differs from the reader's, and it names the *reader's* format in the
+     * exception, so a YUV reader reports "invalid format 19" for a format that
+     * is perfectly valid - the producer is what disagrees. A virtual display
+     * mirrors the composed display, which is RGBA_8888, so this is the path
+     * that runs.
+     *
+     * Preferred to planar YUV where available: the opponent signals the player
+     * and enemy detectors want are channel comparisons, so luma and both scores
+     * come straight from the interleaved bytes - one pass, no round trip.
+     *
+     * @return false if the frame is unusable at this geometry.
+     */
+    bool ingestRgba(const uint8_t* rgba, int stride,
+                    int fullW, int fullH, uint64_t ptsNanos);
+
     // Run the full pipeline for the ingested frame. Call once per ingest.
     void process(uint64_t ptsNanos);
 
