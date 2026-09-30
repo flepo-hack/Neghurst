@@ -1444,10 +1444,37 @@ class RenderaOverlayService : Service() {
         if (visionJob?.isActive == true) return
         visionJob = serviceScope.launch(Dispatchers.Default) {
             var lastAnchors: Anchors? = null
+            // A heartbeat, because "the process vanished and wrote nothing" is
+            // not a diagnosis. This names the last state the loop actually
+            // reached: whether frames were arriving, whether they were being
+            // analysed, and whether the engine was alive. If the trace simply
+            // stops, the loop died between two heartbeats and the counters say
+            // which stage.
+            var beat = 0L
+            var beatFramesReceived = 0L
+            var beatAnalysed = 0L
             // The loop body is wrapped below, but a failure anywhere in it -
             // including the frame bookkeeping - must drop the frame and not the
             // process.
             while (isActive) {
+                if (++beat >= 12) {
+                    beat = 0
+                    runCatching {
+                        events.trace(
+                            "beat got=${framesReceived - beatFramesReceived}" +
+                                " analysed=${framesAnalysed - beatAnalysed}" +
+                                " pool=${framesReceived} consumed=${frameRing.consumedCount}" +
+                                " dropped=${frameRing.droppedCount}" +
+                                " rejected=${framesRejected}" +
+                                " noPlane=${frameRing.missingPlaneCount}" +
+                                " shortPlane=${frameRing.shortPlaneCount}" +
+                                " native=${detector?.isNativeAvailable}" +
+                                " ${frameRing.firstFrameDescription()}"
+                        )
+                    }
+                    beatFramesReceived = framesReceived
+                    beatAnalysed = framesAnalysed
+                }
                 val frame = frameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)

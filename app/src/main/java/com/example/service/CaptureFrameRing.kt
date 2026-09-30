@@ -83,6 +83,7 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     // Written under `lock` by the capture thread and read without it for
     // diagnostics. A 64 bit read is not atomic on 32-bit ART, so these are
     // volatile.
+    @Volatile private var consumedFrames = 0L
     @Volatile private var droppedFrames = 0L
     @Volatile private var rejectedFrames = 0L
     @Volatile private var copyErrors = 0L
@@ -94,6 +95,7 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     @Volatile private var firstFrameReported = false
 
     val droppedCount: Long get() = droppedFrames
+    val consumedCount: Long get() = consumedFrames
     val rejectedCount: Long get() = rejectedFrames
 
     /** Copies that threw. Non zero means the ring is mis-configured, not the device. */
@@ -290,6 +292,7 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
         val rgba = slots[idx] ?: return null
         consumedId = publishedId
         borrowedSlot = idx
+        consumedFrames++
         Frame(
             id = publishedId,
             rgba = rgba,

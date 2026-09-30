@@ -1194,7 +1194,17 @@ void VisionEngine::updateTracks() {
         t.hits++;
         t.misses = 0;
         t.lastSeenNanos = runPts_;
-        t.speedNorm = std::hypot(t.vx, t.vy) / screenW;
+        // The tracker stores velocity in screen pixels PER FRAME - t.vx is
+        // seeded from inX / dd, where inX is the frame's displacement - while
+        // every gate in VisionConfig is expressed per SECOND, and the player
+        // velocity right beside this is already per second
+        // (player_.vx = (nx - x) / frameDt_). Dividing by the frame time puts
+        // the two in the same units, which is the difference between a
+        // projectile gate of 0.2 screen widths a second and 0.2 screen widths
+        // per frame - the latter being about six screen widths a second, which
+        // nothing in the game reaches, so nothing was ever classified as a
+        // projectile and the threat solver never ran.
+        t.speedNorm = std::hypot(t.vx, t.vy) / (screenW * frameDt_);
         t.straightnessNorm = t.straightness;
         t.isProjectile = (t.hits >= cfg_.trackMinHitsForProjectile) &&
                          (t.speedNorm >= cfg_.projectileMinSpeedNorm) &&
@@ -1432,7 +1442,12 @@ void VisionEngine::solveThreat() {
         // r = projectile -> player
         const float rx = player_.x - t.x;
         const float ry = player_.y - t.y;
-        const float tCpa = (rx * t.vx + ry * t.vy) / (vLen * vLen);
+        // (r.v)/|v|^2 is the time to closest approach in FRAMES, because t.vx is
+        // per frame. The horizon and the lethal window are in seconds, and the
+        // player velocity this is compared against is per second. Converting
+        // here rather than rescaling the filter keeps the Kalman update in one
+        // self-consistent unit system.
+        const float tCpa = (rx * t.vx + ry * t.vy) / (vLen * vLen) * frameDt_;
         if (tCpa < cfg_.minTtiSec || tCpa > cfg_.reactionHorizonSec) continue;
 
         const float cpx = t.x + t.vx * tCpa;
@@ -1468,7 +1483,10 @@ void VisionEngine::solveThreat() {
     }
 
     const float step = cfg_.escapeStepNorm * screenW;
-    const float travelSec = step / (cfg_.characterSpeedNorm * screenW);
+    // characterSpeedNorm is screen widths per frame, so this quotient is in
+    // frames. Converted to seconds to match the lethalTtiSec window it is
+    // compared against below.
+    const float travelSec = step / (cfg_.characterSpeedNorm * screenW) * frameDt_;
     const float heading = chooseEscapeHeading(t);
     const float rad = heading * kPi / 180.0f;
 
