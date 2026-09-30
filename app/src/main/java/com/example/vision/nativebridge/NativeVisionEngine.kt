@@ -143,50 +143,23 @@ class NativeVisionEngine(
      *
      * @return a fresh [VisionResult], or `null` when native is unavailable.
      */
-    fun process(
-        yPlane: ByteBuffer,
-        yStride: Int,
-        uPlane: ByteBuffer?,
-        vPlane: ByteBuffer?,
-        uvStride: Int,
-        frameWidth: Int,
-        frameHeight: Int,
-        chromaWidth: Int,
-        chromaHeight: Int,
-        ptsNanos: Long
-    ): VisionResult? {
-        if (!isOpen) return null
-        val rc = nativeProcess(
-            handle, yPlane, yStride, uPlane, vPlane, uvStride,
-            frameWidth, frameHeight, chromaWidth, chromaHeight, ptsNanos,
-            outFloats, outInts
-        )
-        if (rc < 0) return null
-        return VisionResult(outFloats, outInts)
-    }
-
     /**
-     * Runs one YUV frame through the engine.
+     * Runs one interleaved RGBA frame through the engine.
+     *
+     * The pixel path a MediaProjection virtual display actually supports.
      *
      * @return null when native is unavailable or the frame was rejected.
      */
-    fun processResult(
-        yPlane: ByteBuffer,
-        yStride: Int,
-        uPlane: ByteBuffer?,
-        vPlane: ByteBuffer?,
-        uvStride: Int,
+    fun processRgbaResult(
+        rgba: ByteBuffer,
+        rowStride: Int,
         frameWidth: Int,
         frameHeight: Int,
-        chromaWidth: Int,
-        chromaHeight: Int,
         ptsNanos: Long
     ): VisionResult? {
         if (!isOpen) return null
-        val rc = nativeProcess(
-            handle, yPlane, yStride, uPlane, vPlane, uvStride,
-            frameWidth, frameHeight, chromaWidth, chromaHeight, ptsNanos,
-            outFloats, outInts
+        val rc = nativeProcessRgba(
+            rgba, rowStride, frameWidth, frameHeight, ptsNanos, outFloats, outInts
         )
         if (rc < 0) return null
         return VisionResult(outFloats, outInts)
@@ -252,13 +225,14 @@ class NativeVisionEngine(
      * Chroma is nullable. A frame without it still drives motion and tracking on
      * luma alone, which is a partial degradation rather than a lost frame.
      */
-    private external fun nativeProcess(
-        handle: Long,
-        yPlane: ByteBuffer, yStride: Int,
-        uPlane: ByteBuffer?, vPlane: ByteBuffer?, uvStride: Int,
-        frameWidth: Int, frameHeight: Int, chromaWidth: Int, chromaHeight: Int,
+    private external fun nativeProcessRgba(
+        rgbaBuf: ByteBuffer,
+        stride: Int,
+        fullW: Int,
+        fullH: Int,
         ptsNanos: Long,
-        outFloats: FloatArray, outInts: IntArray
+        outF: FloatArray,
+        outI: IntArray
     ): Int
 
     private external fun nativeCopyBlobs(handle: Long, out: FloatArray, maxItems: Int): Int

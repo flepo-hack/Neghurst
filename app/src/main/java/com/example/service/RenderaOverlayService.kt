@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.hardware.HardwareBuffer
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -87,7 +88,7 @@ import kotlinx.coroutines.launch
  *    quarters of the data it copied, allocated a `Bitmap` every frame, and
  *    assumed the image plane limit was `rowStride * height` when it is usually
  *    smaller, so `copyPixelsFromBuffer` threw on real devices. Now `YUV_420_888`
- *    with a pooled direct-buffer ring. See [YuvFrameRing].
+ *    with a pooled direct-buffer ring. See [CaptureFrameRing].
  *
  * 3. **The bubble opened the menu instead of toggling.** The long-press runnable
  *    was posted at 450 ms and only cancelled on `ACTION_UP`, but a *click* also
@@ -164,25 +165,40 @@ class RenderaOverlayService : Service() {
         private const val STATS_INTERVAL_MS = 1000L
 
         /**
-         * The one capture format this app uses: `ImageFormat.YUV_420_888`.
+         * The capture format: `ImageFormat.PRIVATE` (0x01).
          *
-         * It is the only format that is both accepted by `ImageReader.newInstance`
-         * and readable through the public SDK. `ImageReader` validates width,
-         * height, maxImages and NV21 - there is no format whitelist and no
-         * "Invalid format specified" error; an earlier version of this file
-         * asserted there was, and built a dead-end capture path on that invented
-         * rule.
+         * A `VirtualDisplay` mirrors the composed display, which is RGBA_8888.
+         * `ImageReader` will not hand out an image whose format differs from the
+         * one it was built with, and it throws naming **the reader's** format -
+         * so a YUV_420_888 reader reports "Invalid format specified 19" even
+         * though 19 is a perfectly valid format and the producer is what
+         * disagrees. That message is the reason an earlier version of this file
+         * concluded YUV had to be dropped; it is a producer/reader mismatch
+         * wearing the reader's format in the text.
          *
-         * `ImageReader` also requests `USAGE_CPU_READ_OFTEN` for every format
-         * except `PRIVATE`, and a private image has no planes, so a PRIVATE
-         * capture yields no pixels at all through the SDK. That is the format
-         * this app used before, and it is why it captured frames but never
-         * detected anything.
+         * PRIVATE is the documented exemption: the image is acquired anyway, and
+         * its pixels come out of the HardwareBuffer rather than from planes.
+         * See [CAPTURE_READ_USAGE] for the part that makes that readable.
          */
-        const val FMT_YUV_420_888 = 0x13
+        const val FMT_PRIVATE = 0x01
 
-        /** The format name, spelled out once. See [FMT_YUV_420_888]. */
-        const val CAPTURE_FORMAT_NAME = "YUV_420_888"
+        /** The format name, spelled out once. See [FMT_PRIVATE]. */
+        const val CAPTURE_FORMAT_NAME = "PRIVATE"
+
+        /**
+         * Consumer usage requested for the reader.
+         *
+         * This is the whole ballgame. `ImageReader.newInstance` with four
+         * arguments passes **0** as the usage for a PRIVATE reader - the
+         * platform comment says it "may not work, and is inscrutable anyway" -
+         * so the buffer is allocated without CPU access and locking it yields
+         * no pixels. That is why a PRIVATE capture used to report frames
+         * arriving and detect nothing. The five-argument overload takes an
+         * explicit usage; `USAGE_CPU_READ_OFTEN` is what makes the buffer
+         * mappable.
+         */
+        const val CAPTURE_READ_USAGE =
+            HardwareBuffer.USAGE_CPU_READ_OFTEN or HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE
 
         /**
          * Buffers the reader may hold. Two is the documented minimum for a
@@ -236,7 +252,7 @@ class RenderaOverlayService : Service() {
      * One pool, not two: the two modes differ only in the pixel buffer, and two
      * pools would be two places for the geometry to drift.
      */
-    private val frameRing = YuvFrameRing(poolSize = 3)
+    private val frameRing = CaptureFrameRing(poolSize = 3)
 
     private var displayWidth = 0
     private var displayHeight = 0
@@ -798,9 +814,20 @@ class RenderaOverlayService : Service() {
             Log.e(TAG, "Capture size not resolved (${captureWidth}x$captureHeight)")
             return null
         }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            // The usage-taking overload is API 29+. Before that a PRIVATE
+            // reader is allocated without CPU access and cannot be read at all,
+            // and no YUV reader survives the producer, so there is no working
+            // capture on this API level. Say so instead of running blind.
+            val msg = "screen capture needs Android 10 or newer; this device is API " +
+                Build.VERSION.SDK_INT
+            Log.e(TAG, msg)
+            runCatching { events.error("capture", msg) }
+            return null
+        }
         return try {
             val reader = ImageReader.newInstance(
-                captureWidth, captureHeight, FMT_YUV_420_888, MAX_IMAGES
+                captureWidth, captureHeight, FMT_PRIVATE, MAX_IMAGES, CAPTURE_READ_USAGE
             )
             reader.setOnImageAvailableListener(
                 { r: ImageReader -> onFrameAvailable(r) },
@@ -1098,6 +1125,8 @@ class RenderaOverlayService : Service() {
             " a11y=${RenderaAccessibilityService.isAvailable()}" +
             " mode=$mode" +
             " copyFails=${frameRing.copyFailureCount}" +
+            " lockFails=${frameRing.lockFailureCount}" +
+            " noBuf=${frameRing.missingBufferCount}" +
             " rejected=${frameRing.rejectedCount}" +
             " idle=${RenderaAccessibilityService.isIdle()}" +
             " dodges=$dodgeCount"
@@ -1454,20 +1483,15 @@ class RenderaOverlayService : Service() {
                                 null
                             } else {
                                 val f = frame
-                                // The capture is YUV_420_888 and the ring already
-                                // holds the three planes, so the engine ingests
-                                // them in place: no decode, no interleave, and no
-                                // copy beyond the single plane copy the ring made.
-                                d.process(
-                                    yPlane = f.y,
-                                    yStride = f.yStride,
-                                    uPlane = f.u,
-                                    vPlane = f.v,
-                                    uvStride = f.uvStride,
+                                // The capture is interleaved RGBA and the ring
+                                // already holds it tightly packed, so the engine
+                                // reads it in place: one pass computing luma and
+                                // both opponent signals, no decode, no interleave.
+                                d.processRgba(
+                                    rgba = f.rgba,
+                                    rowStride = f.rgbaStride,
                                     frameWidth = f.width,
                                     frameHeight = f.height,
-                                    chromaWidth = f.chromaWidth,
-                                    chromaHeight = f.chromaHeight,
                                     ptsNanos = System.nanoTime(),
                                     screenWidth = displayWidth,
                                     screenHeight = displayHeight,
@@ -1771,6 +1795,12 @@ class RenderaOverlayService : Service() {
             // engine rejected" look identical from the bubble, which is why this
             // read as a dead feature rather than a problem.
             val why = when {
+                framesReceived == 0L && frameRing.lockFailureCount > 0L ->
+                    "The frame buffer is not CPU-readable " +
+                        "(${frameRing.lockFailureCount} locks failed)."
+                framesReceived == 0L && frameRing.missingBufferCount > 0L ->
+                    "Images arrive with no pixel buffer " +
+                        "(${frameRing.missingBufferCount} frames)."
                 framesReceived == 0L ->
                     "The device is not sending frames. ${lastFrameAge()}"
                 frameRing.copyFailureCount > 0L ->
@@ -2558,6 +2588,8 @@ class RenderaOverlayService : Service() {
                 "(format $CAPTURE_FORMAT_NAME, " +
                 "got ${framesReceived}, rejected ${framesRejected}, " +
                 "copy failures ${frameRing.copyFailureCount}, " +
+                "lock failures ${frameRing.lockFailureCount}, " +
+                "no buffer ${frameRing.missingBufferCount}, " +
                 "analysed ${framesAnalysed})"
             mainHandler.post {
                 Toast.makeText(this, why, Toast.LENGTH_LONG).show()

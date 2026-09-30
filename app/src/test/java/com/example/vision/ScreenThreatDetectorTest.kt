@@ -3,6 +3,7 @@ package com.example.vision
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import com.example.vision.nativebridge.NativeVisionEngine
 import org.junit.Test
 
 /**
@@ -57,12 +58,10 @@ class ScreenThreatDetectorTest {
         val detector = ScreenThreatDetector(80, 48, 1920, 1080)
         try {
             if (detector.isNativeAvailable) return
-            val y = com.example.vision.nativebridge.NativeVisionEngine.allocatePlane(80 * 48)
-            val result = detector.process(
-                yPlane = y, yStride = 80,
-                uPlane = null, vPlane = null, uvStride = 0,
+            val rgba = NativeVisionEngine.allocatePlane(80 * 48 * 4)
+            val result = detector.processRgba(
+                rgba = rgba, rowStride = 80 * 4,
                 frameWidth = 80, frameHeight = 48,
-                chromaWidth = 0, chromaHeight = 0,
                 ptsNanos = 1L,
                 screenWidth = 1920, screenHeight = 1080
             )

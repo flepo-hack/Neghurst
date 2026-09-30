@@ -42,10 +42,11 @@ constexpr jint kTrackFloats = 7;
 
 struct Session {
     std::unique_ptr<rendera::VisionEngine> engine;
-    // Reusable direct frame staging. Three slots so the capture thread can
-    // publish a finished frame while the vision thread consumes the previous
-    // one, without ever blocking.
-    int capW = 0, capH = 0, capCW = 0, capCH = 0, yStride = 0, uvStride = 0;
+    // Frame staging deliberately does not live here. The capture thread copies
+    // each frame into a pool of direct buffers on the Kotlin side, and the vision
+    // thread hands one of those straight to nativeProcessRgba, so the bytes are
+    // already in a form JNI can address without a second copy. The capture
+    // geometry is not duplicated here because there is nothing to keep in sync.
 };
 
 inline rendera::VisionEngine* asEngine(jlong handle) {
@@ -211,7 +212,6 @@ Java_com_example_vision_nativebridge_NativeVisionEngine_nativeSetMask(
  *   yBuf/uBuf/vBuf : direct ByteBuffers holding one frame of planes. May be null
  *                    for the chroma planes, in which case only motion detection
  *                    runs.
- *   yStride/uvStride : real plane strides in bytes, so no copy is needed.
  *   outF/jfloatOut  : kOutFloatCount floats, see NativeVisionEngine.kt.
  *                     24 solution floats, then up to 8 projectiles of 5 floats
  *                     (x, y, vx, vy, speed) nearest the brawler first.
@@ -358,55 +358,38 @@ static void writeResults(JNIEnv* env, rendera::VisionEngine* e,
 }
 
 /**
- * Feeds one YUV_420_888 frame: luma plus the two half-resolution chroma planes.
+ * Feeds one interleaved RGBA frame, the format a MediaProjection virtual
+ * display produces.
  *
- * Chroma is optional on purpose. A frame that arrives without usable chroma still
- * carries luma, and luma alone drives motion, the blob stage and the tracker; only
- * the colour-based player and enemy discrimination degrades. Discarding the whole
- * frame because a chroma buffer looked short would turn a partial degradation into
- * a total one.
+ * The reader is created PRIVATE and the pixels come out of the image's
+ * HardwareBuffer, because `ImageReader` refuses to hand out an image whose
+ * format differs from the reader's and a virtual display mirrors the composed
+ * display, which is RGBA_8888. It throws naming the reader's format, so the
+ * message reads as if that format were invalid.
+ *
+ * The capacity check is the only thing standing between a short buffer and a
+ * wild read, so it is not optional.
  */
 JNIEXPORT jint JNICALL
-Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcess(
+Java_com_example_vision_nativebridge_NativeVisionEngine_nativeProcessRgba(
         JNIEnv* env, jobject thiz, jlong handle,
-        jobject yBuf, jint yStride,
-        jobject uBuf, jobject vBuf, jint uvStride,
-        jint fullW, jint fullH, jint chromaW, jint chromaH,
-        jlong ptsNanos,
+        jobject rgbaBuf, jint stride,
+        jint fullW, jint fullH, jlong ptsNanos,
         jfloatArray outF, jintArray outI) {
-    auto* e = asEngine(handle);
+    rendera::VisionEngine* e = asEngine(handle);
     if (e == nullptr) return -1;
-    if (yBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
+    if (rgbaBuf == nullptr || fullW <= 0 || fullH <= 0) return 0;
 
-    auto* y = static_cast<uint8_t*>(env->GetDirectBufferAddress(yBuf));
-    jlong yCap = env->GetDirectBufferCapacity(yBuf);
-    auto* u = uBuf ? static_cast<uint8_t*>(env->GetDirectBufferAddress(uBuf)) : nullptr;
-    auto* v = vBuf ? static_cast<uint8_t*>(env->GetDirectBufferAddress(vBuf)) : nullptr;
+    auto* src = static_cast<uint8_t*>(env->GetDirectBufferAddress(rgbaBuf));
+    const jlong cap = env->GetDirectBufferCapacity(rgbaBuf);
+    if (src == nullptr || stride < fullW * 4) return 0;
+    const jlong needed = static_cast<jlong>(stride) * fullH;
+    if (cap > 0 && cap < needed) return 0;
 
-    if (y == nullptr || yStride <= 0) return 0;
-    // The buffer must actually hold a full frame, otherwise reading it is UB.
-    const jlong needY = static_cast<jlong>(yStride) * static_cast<jlong>(fullH);
-    if (yCap > 0 && yCap < needY) return 0;
-
-    if (u != nullptr && v != nullptr && chromaW > 0 && chromaH > 0 && uvStride > 0) {
-        const jlong needUv = static_cast<jlong>(uvStride) * static_cast<jlong>(chromaH);
-        const jlong uCap = env->GetDirectBufferCapacity(uBuf);
-        const jlong vCap = env->GetDirectBufferCapacity(vBuf);
-        if ((uCap >= 0 && uCap < needUv) || (vCap >= 0 && vCap < needUv)) {
-            u = nullptr;
-            v = nullptr;
-        }
-    } else {
-        u = nullptr;
-        v = nullptr;
-    }
-
-    if (!e->ingestYuv(y, yStride, u, v, uvStride, fullW, fullH, chromaW, chromaH,
-                      static_cast<uint64_t>(ptsNanos))) {
+    if (!e->ingestRgba(src, stride, fullW, fullH, static_cast<uint64_t>(ptsNanos))) {
         return 0;
     }
     e->process(static_cast<uint64_t>(ptsNanos));
-
     writeResults(env, e, outF, outI);
     return e->threat().valid ? 1 : 0;
 }

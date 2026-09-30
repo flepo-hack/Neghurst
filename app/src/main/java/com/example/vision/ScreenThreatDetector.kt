@@ -199,36 +199,29 @@ class ScreenThreatDetector(
     }
 
     /**
-     * One analysed frame from the YUV_420_888 capture.
+     * One analysed frame from the interleaved RGBA capture.
      *
-     * The only pixel path. Luma and chroma arrive already separated, so there is
-     * no interleave, no decode and no per-frame allocation.
+     * The pixel path that works. Luma and both opponent signals are computed
+     * natively in one pass over the interleaved bytes, so there is no colour
+     * space round trip and no per-frame allocation.
      *
      * @param collectDebug when false, the debug readouts are not copied out.
      *        Those copies allocate, so they are kept off the default path.
      * @return null when native is unavailable or the frame was rejected.
      */
-    fun process(
-        yPlane: ByteBuffer,
-        yStride: Int,
-        uPlane: ByteBuffer?,
-        vPlane: ByteBuffer?,
-        uvStride: Int,
+    fun processRgba(
+        rgba: ByteBuffer,
+        rowStride: Int,
         frameWidth: Int,
         frameHeight: Int,
-        chromaWidth: Int,
-        chromaHeight: Int,
         ptsNanos: Long,
         screenWidth: Int,
         screenHeight: Int,
         collectDebug: Boolean = false
     ): Analysis? {
-        val raw = engine.processResult(
-            yPlane = yPlane, yStride = yStride,
-            uPlane = uPlane, vPlane = vPlane, uvStride = uvStride,
-            frameWidth = frameWidth, frameHeight = frameHeight,
-            chromaWidth = chromaWidth, chromaHeight = chromaHeight,
-            ptsNanos = ptsNanos
+        val raw = engine.processRgbaResult(
+            rgba = rgba, rowStride = rowStride,
+            frameWidth = frameWidth, frameHeight = frameHeight, ptsNanos = ptsNanos
         ) ?: return null
         return processFrame(raw, screenWidth, screenHeight, collectDebug)
     }
@@ -239,7 +232,8 @@ class ScreenThreatDetector(
      * Kept as a named step so the threat geometry, the escape solve and the debug
      * snapshots cannot drift away from the engine's own numbers.
      */
-    private fun processFrame(        raw: com.example.vision.nativebridge.VisionResult,
+    private fun processFrame(
+        raw: com.example.vision.nativebridge.VisionResult,
         screenWidth: Int,
         screenHeight: Int,
         collectDebug: Boolean

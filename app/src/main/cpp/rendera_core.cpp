@@ -262,109 +262,61 @@ void VisionEngine::screenToGrid(float sx, float sy, float& gx, float& gy) const 
 // Stage 1: ingest + box downsample
 // ===========================================================================
 
-void VisionEngine::downsampleFromYuv(const uint8_t* y, int yStride,
-                                     const uint8_t* u, const uint8_t* v, int uvStride,
-                                     int fullW, int fullH, int chromaW, int chromaH) {
-    if (capW_ <= 0 || capH_ <= 0 || y == nullptr) return;
-
-    // Bin origins are recomputed per call because the capture geometry can
-    // change on rotation. Integer steps keep the gather branch free.
+void VisionEngine::downsampleFromRgba(
+    const uint8_t* rgba, int stride, int fullW, int fullH) {
     const int stepX = std::max(1, fullW / gridW_);
     const int stepY = std::max(1, fullH / gridH_);
-    const int cStepX = std::max(1, chromaW / std::max(1, gridW_));
-    const int cStepY = std::max(1, chromaH / std::max(1, gridH_));
-    const bool haveChroma = (u != nullptr && v != nullptr && chromaW > 0 && chromaH > 0);
 
     for (int gy = 0; gy < gridH_; ++gy) {
-        int sy = gy * stepY;
-        if (sy >= fullH) sy = fullH - 1;
-        const uint8_t* yRow = y + static_cast<size_t>(sy) * yStride;
+        const int sy = std::min(fullH - 1, gy * stepY);
+        const uint8_t* row = rgba + static_cast<size_t>(sy) * stride;
         const int outRow = gy * gridW_;
-
         for (int gx = 0; gx < gridW_; ++gx) {
-            int sx = gx * stepX;
-            if (sx >= fullW) sx = fullW - 1;
-            luma_[static_cast<size_t>(outRow + gx)] = yRow[sx];
-        }
+            const int sx = std::min(fullW - 1, gx * stepX);
+            const uint8_t* px = row + static_cast<size_t>(sx) * 4;
+            const int r = px[0], g = px[1], b = px[2];
 
-        if (haveChroma) {
-            int cy = gy * cStepY;
-            if (cy >= chromaH) cy = chromaH - 1;
-            const uint8_t* uRow = u + static_cast<size_t>(cy) * uvStride;
-            const uint8_t* vRow = v + static_cast<size_t>(cy) * uvStride;
-            for (int gx = 0; gx < gridW_; ++gx) {
-                int cx = gx * cStepX;
-                if (cx >= chromaW) cx = chromaW - 1;
-                const size_t ci = static_cast<size_t>(outRow + gx);
+            // Luma straight from the channels, no colour space round trip.
+            luma_[outRow + gx] = static_cast<uint8_t>(
+                clampf(0.299f * r + 0.587f * g + 0.114f * b, 0.0f, 255.0f));
 
-                // BT.601 studio-swing YUV -> normalised RGB. MediaProjection
-                // hands us video-range chroma, so the 16/219 and 128/224 offsets
-                // matter; skipping them skews every recovered channel.
-                // Reuse the luma already written to the grid for this cell: the
-                // source column index is scoped to the luma loop above.
-                const float yp =
-                    (static_cast<float>(luma_[ci]) - 16.0f) * (1.0f / 219.0f);
-                const float cb = (static_cast<float>(uRow[cx]) - 128.0f) * (1.0f / 224.0f);
-                const float cr = (static_cast<float>(vRow[cx]) - 128.0f) * (1.0f / 224.0f);
+            // Opponent signals in the source space. These are exactly the
+            // quantities the detector wants, so computing them here is both
+            // cheaper and more accurate than converting to YUV, reconstructing
+            // RGB, and comparing channels again.
+            const float fr = r / 255.0f, fg = g / 255.0f, fb = b / 255.0f;
+            const float mx = std::max(fr, std::max(fg, fb));
+            const float mn = std::min(fr, std::min(fg, fb));
+            const float gOpp = fg - std::max(fr, fb);
+            const float rOpp = fr - std::max(fg, fb);
 
-                // Deliberately NOT clamped to 0..1 here, only the final 0..255
-                // score is. Measured over the real Brawl Stars palette the two
-                // forms agree, but clamping per channel is not safe in
-                // principle: a pixel whose R and G both exceed 1.0 (a vivid
-                // green ring is exactly that) would clamp to equality, and
-                // G - max(R, B) would collapse to zero, silently rejecting the
-                // brightest greens in the game. A difference of out of gamut
-                // values is harmless; a difference of clamped values is not.
-                const float r = yp + 1.402f * cr;
-                const float g = yp - 0.344136f * cb - 0.714136f * cr;
-                const float b = yp + 1.772f * cb;
-
-                const float mx = std::max(r, std::max(g, b));
-                const float mn = std::min(r, std::min(g, b));
-
-                // Opponent signals, not raw chroma. gOpponent = G - max(R, B) is
-                // positive only for a genuinely green pixel, and it is hue
-                // correct, which the previous (2*cr - cb) form was not.
-                const float gOpp = g - std::max(r, b);
-                const float rOpp = r - std::max(g, b);
-
-                green_[ci] = static_cast<uint8_t>(clampf(gOpp * kOpponentScale, 0.0f, 255.0f));
-                red_[ci] = static_cast<uint8_t>(clampf(rOpp * kOpponentScale, 0.0f, 255.0f));
-                // Saturation is what separates Brawl Stars' vivid selection ring
-                // (~240) from grass of the same hue (~80).
-                sat_[ci] = static_cast<uint8_t>(clampf((mx - mn) * kOpponentScale, 0.0f, 255.0f));
-            }
-        } else {
-            std::memset(green_.data() + outRow, 0, static_cast<size_t>(gridW_));
-            std::memset(red_.data() + outRow, 0, static_cast<size_t>(gridW_));
-            std::memset(sat_.data() + outRow, 0, static_cast<size_t>(gridW_));
+            green_[outRow + gx] = static_cast<uint8_t>(
+                clampf(gOpp * kOpponentScale, 0.0f, 255.0f));
+            red_[outRow + gx] = static_cast<uint8_t>(
+                clampf(rOpp * kOpponentScale, 0.0f, 255.0f));
+            sat_[outRow + gx] = static_cast<uint8_t>(
+                clampf((mx - mn) * kOpponentScale, 0.0f, 255.0f));
         }
     }
 }
 
-bool VisionEngine::ingestYuv(const uint8_t* yPlane, int yStride,
-                             const uint8_t* uPlane, const uint8_t* vPlane, int uvStride,
-                             int fullW, int fullH, int chromaW, int chromaH,
-                             uint64_t ptsNanos) {
-    if (yPlane == nullptr || fullW <= 0 || fullH <= 0) return false;
+bool VisionEngine::ingestRgba(
+    const uint8_t* rgba, int stride, int fullW, int fullH, uint64_t ptsNanos) {
+    if (rgba == nullptr || fullW <= 0 || fullH <= 0 || stride < fullW * 4) return false;
 
-    if (capW_ != fullW || capH_ != fullH || capYStride_ != yStride ||
-        capUvStride_ != uvStride) {
-        // Geometry changed (rotation, or a resolution switch). Reconfigure and
-        // drop history, otherwise the difference stage would compare buffers
-        // that do not correspond to the same screen.
-        configureCapture(fullW, fullH, yStride, uvStride);
+    // The stride is part of the geometry, not a detail: after a resize the rows
+    // move and a stale stride would shear every sample.
+    if (capW_ != fullW || capH_ != fullH || capRgbaStride_ != stride) {
+        configureCapture(fullW, fullH, stride);
         hasPrev_ = false;
     }
 
     const bool hadPrevious = hasPrev_;
     std::memcpy(prevLuma_.data(), luma_.data(), static_cast<size_t>(totalCells_));
-    downsampleFromYuv(yPlane, yStride, uPlane, vPlane, uvStride,
-                      fullW, fullH, chromaW, chromaH);
+    downsampleFromRgba(rgba, stride, fullW, fullH);
     if (!hadPrevious) {
-        // Mirror the first frame into the history. Differencing against the
-        // zero-initialised buffer would light up the entire frame on the first
-        // call and hand the tracker a screen-sized "projectile".
+        // Mirror the first frame into the history, or the difference stage lights
+        // up the whole screen and hands the tracker a screen-sized projectile.
         std::memcpy(prevLuma_.data(), luma_.data(), static_cast<size_t>(totalCells_));
     }
     hasPrev_ = true;

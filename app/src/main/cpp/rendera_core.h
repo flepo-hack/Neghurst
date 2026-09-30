@@ -387,17 +387,6 @@ class VisionEngine {
 public:
     explicit VisionEngine(const EngineConfig& cfg);
 
-    // Ingest one captured frame.
-    //   yPlane  : luma,   fullW * fullH samples, `yStride` bytes per row
-    //   uPlane  : Cb,     chromaW * chromaH samples, `uvStride` bytes per row
-    //   vPlane  : Cr,     same layout as uPlane
-    // Chroma planes may be null, in which case green/red scores stay 0 and only
-    // motion based detection runs.
-    // Returns false if the dimensions do not match the configured capture size.
-    bool ingestYuv(const uint8_t* yPlane, int yStride,
-                   const uint8_t* uPlane, const uint8_t* vPlane, int uvStride,
-                   int fullW, int fullH, int chromaW, int chromaH,
-                   uint64_t ptsNanos);
 
     // Run the full pipeline for the ingested frame. Call once per ingest.
     void process(uint64_t ptsNanos);
@@ -416,15 +405,10 @@ public:
 
     /**
      * One-time capture geometry setup. Must be called before the first ingest so
-     * the downsample can avoid per-frame divisions and honour real plane strides.
-     *
-     * Chroma dimensions are derived from the luma ones rather than passed in:
-     * every YUV_420_888 source is half resolution in both axes by definition, so
-     * accepting them as parameters only ever allowed the two to disagree.
+     * the downsample can avoid per-frame divisions and honour the real stride.
      */
-    void configureCapture(int capW, int capH, int yStride, int uvStride) {
-        capW_ = capW; capH_ = capH;
-        capYStride_ = yStride; capUvStride_ = uvStride;
+    void configureCapture(int capW, int capH, int rgbaStride) {
+        capW_ = capW; capH_ = capH; capRgbaStride_ = rgbaStride;
     }
 
     void setScreenSize(int w, int h) { screenW_ = w > 0 ? w : 1; screenH_ = h > 0 ? h : 1; }
@@ -449,9 +433,8 @@ public:
 
 private:
     // --- stages ---
-    void downsampleFromYuv(const uint8_t* y, int yStride,
-                          const uint8_t* u, const uint8_t* v, int uvStride,
-                          int fullW, int fullH, int chromaW, int chromaH);
+    void downsampleFromRgba(const uint8_t* rgba, int stride, int fullW, int fullH);
+
     void estimateGlobalMotion();
     bool computeCorrelatedMotion();
     void refineMotionAtFullRes();
@@ -491,8 +474,10 @@ private:
     int gridW_ = 0, gridH_ = 0, totalCells_ = 0;
     int screenW_ = 1080, screenH_ = 1920;
 
-    // Capture geometry, fixed at construction time by configureCapture().
-    int capW_ = 0, capH_ = 0, capYStride_ = 0, capUvStride_ = 0;
+    // Capture geometry, fixed by configureCapture() on the first frame of a
+    // given size. The stride is part of it: after a resize the rows move, and a
+    // stale stride shears every sample.
+    int capW_ = 0, capH_ = 0, capRgbaStride_ = 0;
 
     // Working grid buffers.
     std::vector<uint8_t> luma_;

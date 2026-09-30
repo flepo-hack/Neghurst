@@ -61,16 +61,13 @@ class NativeVisionEngineContractTest {
     }
 
     @Test
-    fun `process returns null when native is unavailable instead of inventing a threat`() {
+    fun `processRgba returns null when native is unavailable instead of inventing a threat`() {
         val engine = NativeVisionEngine(80, 48, 1920, 1080)
         try {
-            val y = NativeVisionEngine.allocatePlane(80 * 48)
-            val chroma = NativeVisionEngine.allocatePlane(40 * 24)
-            val result = engine.process(
-                yPlane = y, yStride = 80,
-                uPlane = chroma, vPlane = chroma, uvStride = 40,
+            val rgba = NativeVisionEngine.allocatePlane(80 * 48 * 4)
+            val result = engine.processRgbaResult(
+                rgba = rgba, rowStride = 80 * 4,
                 frameWidth = 80, frameHeight = 48,
-                chromaWidth = 40, chromaHeight = 24,
                 ptsNanos = 1_000_000L
             )
             if (engine.isOpen) {
@@ -90,11 +87,9 @@ class NativeVisionEngineContractTest {
         val engine = NativeVisionEngine(80, 48, 1920, 1080)
         try {
             val tiny = NativeVisionEngine.allocatePlane(16)
-            val result = engine.process(
-                yPlane = tiny, yStride = 80,
-                uPlane = null, vPlane = null, uvStride = 0,
+            val result = engine.processRgbaResult(
+                rgba = tiny, rowStride = 80 * 4,
                 frameWidth = 4096, frameHeight = 4096,
-                chromaWidth = 0, chromaHeight = 0,
                 ptsNanos = 1L
             )
             assertTrue("a frame larger than the buffer must be refused", result == null)
