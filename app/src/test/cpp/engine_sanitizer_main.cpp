@@ -90,6 +90,7 @@ struct Canvas {
 };
 
 int failures = 0;
+int totalThreats = 0;
 
 void expect(bool ok, const char* what) {
     if (!ok) {
@@ -171,6 +172,7 @@ void run(rendera::VisionEngine& engine, Canvas& c, int frames, int gridW, int gr
         expect(enemies <= 10, "enemy count exceeds maxEnemies");
     }
 
+    totalThreats += threats;
     std::printf("    %dx%d grid %dx%d: player %d/%d, threats %d, "
                 "max tracks %d, blobs %d, enemies %d\n",
                 c.w, c.h, gridW, gridH, playerSeen, frames, threats,
@@ -180,12 +182,28 @@ void run(rendera::VisionEngine& engine, Canvas& c, int frames, int gridW, int gr
 }  // namespace
 
 int main() {
+    // The configuration the app actually ships, not the struct defaults.
+    //
+    // RenderaOverlayService.tuningFromPrefs() overwrites six fields at the
+    // default sensitivity of 0.70, and check_jni.py only proves the values are
+    // read and written in the same order - not that they are the ones in use.
+    // A harness on the struct defaults therefore tests a configuration that
+    // never runs, and when it reported no threats at all that was a statement
+    // about the wrong numbers. These are the shipped ones, arithmetic included.
+    constexpr float kSensitivity = 0.70f;
+
     rendera::EngineConfig cfg;
     cfg.gridW = 200;
     cfg.gridH = 112;
-    cfg.playerAnchorX = 0.5f;
-    cfg.playerAnchorY = 0.6f;
-    cfg.playerAnchorLocked = true;
+    cfg.playerAnchorX = 0.50f;
+    cfg.playerAnchorY = 0.52f;
+    cfg.playerAnchorLocked = false;  // Anchors.calibrated defaults to false
+    cfg.diffNoiseFloor = 26.0f - kSensitivity * 12.0f;   // 17.6 -> 18
+    cfg.playerMinGreenScore = 48.0f + kSensitivity * 30.0f;   // 69
+    cfg.enemyMinRedScore = 40.0f + kSensitivity * 26.0f;     // 58.2
+    cfg.projectileMinSpeedNorm = 0.30f - kSensitivity * 0.14f;      // 0.202
+    cfg.projectileMinStraightness = 0.70f - kSensitivity * 0.22f;    // 0.546
+    cfg.reactionHorizonSec = 0.32f + kSensitivity * 0.18f;           // 0.446
 
     rendera::VisionEngine engine(cfg);
 
@@ -209,6 +227,18 @@ int main() {
     std::printf("  back to 480x216\n");
     a.reset(480, 216);
     run(engine, a, 120, 200, 112, 2400, 1080);
+
+    // A pipeline that never solves a threat on a scene with projectiles crossing
+    // a player is broken in a way no sanitizer notices. Asserted as "at least
+    // one", not a number: the exact count depends on the synthetic scene, but
+    // zero on this scene is what a dead solve path looks like.
+    if (totalThreats == 0) {
+        std::printf("  FAIL: no threat was ever solved on a scene with "
+                    "projectiles crossing a player\n");
+        ++failures;
+    } else {
+        std::printf("  threats solved overall: %d\n", totalThreats);
+    }
 
     if (failures == 0) {
         std::printf("OK: engine ran clean under ASan/UBSan.\n");
