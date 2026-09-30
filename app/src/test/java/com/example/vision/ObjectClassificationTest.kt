@@ -194,7 +194,7 @@ class ObjectClassificationTest {
         // value that ships (14). With the old literal this loop asserted that a
         // 20-cell slow blob was UNKNOWN, which the real engine has called a BALL
         // ever since the threshold was retuned.
-        val ball = tuning.ballMinArea
+        val ball = tuning.ballMinArea.toFloat()
         for (area in listOf(1f, ball - 1f)) {
             assertEquals(
                 "area $area, slow wandering mover, below the ball threshold",
