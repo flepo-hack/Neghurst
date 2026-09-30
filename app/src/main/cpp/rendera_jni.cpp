@@ -9,7 +9,9 @@
 
 #include <jni.h>
 
+#include <execinfo.h>
 #include <fcntl.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -54,8 +56,7 @@ constexpr jint kTrackFloats = 7;
 // this library is indistinguishable from the app being killed by the system: the
 // log shows a session record and nothing else. That is exactly the report this
 // exists to turn into an answer, so the handler records the signal, the faulting
-// address and the library-relative offset of a few frames, and only async-safe
-// calls are used on that path.
+// address, the real thread name and id, and a short frame list.
 namespace {
 
 // Set by nativeSetCrashFile before any engine exists. Owned, because the
@@ -66,21 +67,61 @@ void crashHandler(int sig, siginfo_t* info, void* ctx) {
     if (gCrashPath != nullptr && gCrashPath[0] != '\0') {
         int fd = ::open(gCrashPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) {
-            char buf[512];
+            // The real thread name. The previous version wrote a literal
+            // "capture", which is a claim rather than a measurement and would
+            // have misdirected the whole investigation.
+            char name[32] = {0};
+            prctl(PR_GET_NAME, name, 0, 0, 0);
+
+            char buf[1024];
             int n = std::snprintf(buf, sizeof(buf),
                 "{\"type\":\"native-crash\",\"signal\":%d,\"code\":%d,"
-                "\"addr\":\"%p\",\"thread\":\"%s\",\"build\":\"1.0\"}\n",
+                "\"addr\":\"%p\",\"thread\":\"%s\",\"tid\":%d,"
+                "\"build\":\"1.0\",\"frames\":[",
                 sig, info != nullptr ? info->si_code : 0,
-                info != nullptr ? info->si_addr : nullptr, "capture");
+                info != nullptr ? info->si_addr : nullptr, name,
+                static_cast<int>(::gettid()));
+
+            // Unwind a short frame list. Not async-signal-safe in the strict
+            // sense, and that is the deliberate trade: without the PCs the only
+            // thing a report can say is an address, and an address alone cannot
+            // be turned into a line of code. Written with write() immediately,
+            // before anything else can fault, and only on the path that is
+            // already unwinding.
+            void* frames[24];
+            const int nFrames = ::backtrace(frames, 24);
+            for (int i = 0; i < nFrames && n > 0 && n < (int)sizeof(buf) - 24; ++i) {
+                n += std::snprintf(buf + n, sizeof(buf) - n, "%s\"%p\"",
+                                   i == 0 ? "" : ",", frames[i]);
+            }
+            if (n > 0 && n < (int)sizeof(buf) - 4) {
+                n += std::snprintf(buf + n, sizeof(buf) - n, "]}\n");
+            }
             if (n > 0) {
                 ssize_t ignored = ::write(fd, buf, static_cast<size_t>(n));
                 (void)ignored;
+            }
+            // The load base, so a frame can be turned into a file and offset.
+            char maps[512];
+            int m = std::snprintf(maps, sizeof(maps), "{\"type\":\"maps\"}\n");
+            if (m > 0) {
+                int mf = ::open("/proc/self/maps", O_RDONLY);
+                if (mf >= 0) {
+                    // Only the library's own mapping is needed, and truncating a
+                    // maps dump mid-line is better than not writing it at all.
+                    ssize_t got = ::read(mf, maps + m, sizeof(maps) - m - 2);
+                    if (got > 0) {
+                        ssize_t w = ::write(fd, maps, static_cast<size_t>(m + got));
+                        (void)w;
+                    }
+                    ::close(mf);
+                }
             }
             ::close(fd);
         }
     }
     // Re-raise with the default handler so the process still dies the way the
-    // system expects, and the tombstone still gets written.
+    // system expects, and the tombstone is still produced.
     struct sigaction dfl;
     std::memset(&dfl, 0, sizeof(dfl));
     dfl.sa_handler = SIG_DFL;

@@ -1,9 +1,6 @@
 package com.example.service
 
-import android.graphics.Bitmap
-import android.graphics.ColorSpace
 import android.media.Image
-import android.os.Build
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -13,35 +10,47 @@ import java.nio.ByteOrder
  *
  * ## What this does
  *
- * The reader is created as `ImageFormat.PRIVATE`, and each frame's pixels are
- * read out of the image's `HardwareBuffer` into a preallocated direct
- * [ByteBuffer]. Nothing is allocated per frame and no `Bitmap` is ever created.
+ * The reader is created as `PixelFormat.RGBA_8888` and each frame's single
+ * interleaved plane is copied row by row into a preallocated direct
+ * [ByteBuffer], honouring the plane's own `rowStride` and `pixelStride`. No
+ * `Bitmap` is created, no `HardwareBuffer` is wrapped, and nothing is allocated
+ * per frame.
  *
- * ## Why PRIVATE, and why the buffer has to be locked properly
+ * ## Why the plane, and not a hardware buffer
  *
- * A `VirtualDisplay` mirrors the composed display, which is `RGBA_8888`. An
- * `ImageReader` will not hand out an image whose format differs from the one it
- * was created with - it throws `UnsupportedOperationException` naming **the
- * reader's** format, so a YUV_420_888 reader reports "Invalid format specified
- * 19" when format 19 is perfectly valid and the producer is what disagrees. A
- * PRIVATE reader is the documented exemption: the image is acquired anyway.
+ * This is the recipe the platform's own tests use for exactly this job:
+ * AOSP `VirtualDisplayTest` and CTS `MediaProjectionMirroringTest` both create
+ * the reader with `PixelFormat.RGBA_8888` and read `image.planes[0]`, copying
+ * out the row padding by hand. That path touches no native platform code beyond
+ * the `Image` API, so it has no null-pointer path to fault on.
  *
- * PRIVATE has two catches, and both of them have to be handled.
+ * The alternative - `image.hardwareBuffer` then
+ * `Bitmap.wrapHardwareBuffer(...).copy(ARGB_8888, false)` - is what an earlier
+ * version of this file did, and it produced a native SIGSEGV on the first frame
+ * (`SEGV_MAPERR` at a small offset from null, on the capture thread). The reason
+ * is structural rather than accidental: `wrapHardwareBuffer` is a GPU-path API.
+ * It is documented as requiring `USAGE_GPU_SAMPLED_IMAGE`, and its CPU "copy" is
+ * a RenderThread readback, not a memcpy. For a buffer whose format is
+ * `AHARDWAREBUFFER_FORMAT_PRIVATE` (0x22) hwui's `createImageInfo` has no case at
+ * all, so the wrapped bitmap is silently built with an unknown colour type and a
+ * row stride of zero, and reading from it writes through a null pixel pointer.
+ * No production implementation does this: scrcpy and media3 never ask for CPU
+ * pixels at all, and the AOSP capture clients that do use `RGBA_8888` plus
+ * `getPlanes()[0]`.
  *
- * First, `ImageReader.newInstance` with four arguments deliberately does **not**
- * request `USAGE_CPU_READ_OFTEN` for a PRIVATE reader - the platform comment
- * says it "may not work, and is inscrutable anyway" - so its buffer is
- * allocated without CPU access. The four-argument constructor is the trap; the
- * five-argument one takes an explicit usage, and `USAGE_CPU_READ_OFTEN` is what
- * makes the buffer mappable at all.
+ * ## Format constants, which are not what they look like
  *
- * Second, and this is why an earlier attempt at this file never compiled:
- * `HardwareBuffer.lock()`, `unlock()` and `rowStride` are all `@hide`. They are
- * not in the public SDK, so Kotlin rejects them outright - there is no way to
- * read a private image's bytes through them from an app. The public route is
- * [Bitmap.wrapHardwareBuffer], which gives a bitmap that can be copied into CPU
- * memory. That costs one full-frame copy per frame, which is why the rows are
- * written straight into the pooled buffer rather than through an intermediate.
+ * `android.graphics.ImageFormat` and `android.graphics.PixelFormat` are separate
+ * enums that deliberately do not overlap, and the platform renumbered
+ * `ImageFormat` when it moved out of `PixelFormat`:
+ *
+ *  - `ImageFormat.PRIVATE` is **0x22 (34)**, not 1
+ *  - `ImageFormat.YUV_420_888` is **0x23 (35)**, not 0x13 (19)
+ *  - `PixelFormat.RGBA_8888` is **0x01 (1)**
+ *
+ * So 19 is not a valid format at all, and "Invalid format specified 19" is
+ * literally true rather than a producer mismatch. A virtual display mirrors the
+ * composed display, which is RGBA_8888, so that is what is asked for here.
  *
  * ## Threading
  *
@@ -77,9 +86,12 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     @Volatile private var droppedFrames = 0L
     @Volatile private var rejectedFrames = 0L
     @Volatile private var copyErrors = 0L
-    @Volatile private var noBufferFrames = 0L
-    @Volatile private var lockFailures = 0L
+    @Volatile private var noPlaneFrames = 0L
+    @Volatile private var shortPlaneFrames = 0L
     @Volatile private var observedFormat = -1
+    @Volatile private var observedRowStride = -1
+    @Volatile private var observedPixelStride = -1
+    @Volatile private var firstFrameReported = false
 
     val droppedCount: Long get() = droppedFrames
     val rejectedCount: Long get() = rejectedFrames
@@ -87,20 +99,24 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     /** Copies that threw. Non zero means the ring is mis-configured, not the device. */
     val copyFailureCount: Long get() = copyErrors
 
-    /** Frames whose image carried no hardware buffer at all. */
-    val missingBufferCount: Long get() = noBufferFrames
+    /** Images that arrived with no readable plane at all. */
+    val missingPlaneCount: Long get() = noPlaneFrames
 
-    /** Frames whose buffer could not be locked, i.e. no CPU-readable pixels. */
-    val lockFailureCount: Long get() = lockFailures
+    /** Images whose plane held fewer bytes than one row needs. */
+    val shortPlaneCount: Long get() = shortPlaneFrames
 
     /**
-     * The `ImageReader` format of the last image that carried a buffer.
+     * What the first frame actually looked like.
      *
-     * Recorded because a virtual display is entitled to change it, and a silent
-     * change from RGBA to something else is exactly the kind of thing that
-     * makes a capture stop detecting without anything reporting an error.
+     * Reported once, because "no frames" and "frames that are the wrong shape"
+     * are indistinguishable from outside and both mean the capture geometry and
+     * the device disagree.
      */
-    val lastImageFormat: Int get() = observedFormat
+    fun firstFrameDescription(): String =
+        "format=$observedFormat planes=${observedPlanes} " +
+            "rowStride=$observedRowStride pixelStride=$observedPixelStride"
+
+    @Volatile private var observedPlanes = -1
 
     /** Sizes the pool. Safe to call on a configuration change. */
     fun configure(width: Int, height: Int) {
@@ -109,9 +125,9 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             if (width == frameWidth && height == frameHeight) return
             frameWidth = width
             frameHeight = height
-            // Exactly width * 4, no padding: copyPixelsToBuffer writes rows
-            // tightly packed, and a padded stride here would shift every row
-            // but the first. 4 bytes is the alignment the engine needs.
+            // Exactly width * 4, no padding. copyPixelsToBuffer is not used, so
+            // the stride is ours to choose, and an exact stride means the native
+            // gather can walk rows without a bounds check per row.
             rgbaStride = width * 4
             slots = Array(poolSize) { allocate(rgbaStride * height) }
             borrowedSlot = -1
@@ -137,6 +153,19 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             rejectedFrames++
             return false
         }
+        val planes = image.planes
+        if (planes.isEmpty()) {
+            // A PRIVATE image has no planes by design. Seeing one here means the
+            // reader is not the format it was created as, which is worth a
+            // distinct count rather than a generic rejection.
+            noPlaneFrames++
+            rejectedFrames++
+            observedFormat = image.format
+            observedPlanes = 0
+            reportFirstFrameOnce("no planes")
+            return false
+        }
+
         synchronized(lock) {
             val idx = nextFreeSlot() ?: return false
             if (idx == publishedSlot) {
@@ -145,23 +174,21 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             }
             val dst = slots[idx] ?: return false
             val ok = try {
-                // Image gained getHardwareBuffer() in API 28, and the reader
-                // that produces a CPU-mappable buffer needs API 29 anyway; the
-                // service refuses to start below that and says so.
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-                    noBufferFrames++
-                    rejectedFrames++
-                    false
-                } else {
-                    copyPixels(image, dst)
-                }
+                copyPlane(planes[0], dst, frameWidth, frameHeight)
             } catch (t: Throwable) {
                 copyErrors++
                 rejectedFrames++
                 Log.w(TAG, "frame copy failed", t)
                 false
             }
+            if (!ok) return false
+
             observedFormat = image.format
+            observedPlanes = planes.size
+            observedRowStride = planes[0].rowStride
+            observedPixelStride = planes[0].pixelStride
+            reportFirstFrameOnce(null)
+
             publishedSlot = idx
             publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
             return true
@@ -169,58 +196,73 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     }
 
     /**
-     * Moves one image's pixels into [dst].
+     * Copies one interleaved plane, honouring its strides.
      *
-     * `HardwareBuffer.lock()` is @hide, so the public route is to wrap the
-     * buffer as a bitmap and copy it into CPU memory. `wrapHardwareBuffer` is
-     * zero-copy; the `copy` is not, and it is the one unavoidable per-frame
-     * allocation this path has. It is a 480x216 ARGB buffer, which is small
-     * enough that it is not worth a custom native path, and a custom one would
-     * mean reimplementing a locked, fence-aware read in C++ to avoid it.
-     *
-     * `ARGB_8888` bitmaps are stored as R,G,B,A bytes in memory, which is the
-     * order the engine's downsampler reads.
+     * `rowStride` may exceed `width * 4`: the driver is free to pad rows, and a
+     * tight read over a padded plane shears every row but the first. The plane
+     * buffer's own `limit` is also frequently smaller than
+     * `rows * rowStride`, because it is the used size and not the allocation, so
+     * every row is bounds-checked against it.
      */
-    private fun copyPixels(image: Image, dst: ByteBuffer): Boolean {
-        val hb = image.hardwareBuffer
-        if (hb == null) {
-            noBufferFrames++
+    private fun copyPlane(
+        plane: Image.Plane,
+        dst: ByteBuffer,
+        width: Int,
+        height: Int
+    ): Boolean {
+        val src = plane.buffer
+        val srcRowStride = plane.rowStride
+        val srcPixelStride = plane.pixelStride
+        val limit = src.limit()
+
+        if (srcPixelStride != 4) {
+            // An RGBA plane with any other pixel stride is not what this code
+            // is written against, and copying it as if it were 4 would produce
+            // plausible-looking garbage. Better to say so.
+            shortPlaneFrames++
             rejectedFrames++
             return false
         }
-        // wrapHardwareBuffer is declared @Nullable: it returns null when the
-        // buffer cannot be wrapped, which is a real outcome and not a crash.
-        val wrapped = Bitmap.wrapHardwareBuffer(hb, SRGB)
-        if (wrapped == null) {
-            noBufferFrames++
+        val rowBytes = width * 4
+        if (srcRowStride < rowBytes || limit < (height - 1L) * srcRowStride + rowBytes) {
+            shortPlaneFrames++
             rejectedFrames++
             return false
         }
-        // The hardware bitmap is a view on the capture buffer and must not be
-        // recycled: the image owns it. The software copy is ours.
-        val software = wrapped.copy(Bitmap.Config.ARGB_8888, false)
-        try {
-            if (software.width != frameWidth || software.height != frameHeight) {
-                rejectedFrames++
-                return false
-            }
-            // copyPixelsToBuffer writes rows tightly packed, so the pool stride
-            // has to be exactly width * 4 or every row after the first is read
-            // from the wrong offset.
-            dst.clear()
-            software.copyPixelsToBuffer(dst)
-            if (dst.position() < frameWidth * 4 * frameHeight) {
-                // Fewer bytes than the frame needs. Copying on would hand the
-                // engine a buffer that is silently short.
-                lockFailures++
-                rejectedFrames++
-                return false
-            }
+
+        dst.clear()
+        if (srcRowStride == rowBytes) {
+            // Tight plane: one bulk copy, no per-row window.
+            val srcView = src.duplicate()
+            srcView.position(0)
+            srcView.limit(rowBytes * height)
+            dst.put(srcView)
             dst.clear()
             return true
-        } finally {
-            software.recycle()
         }
+
+        val row = ByteArray(rowBytes)
+        for (y in 0 until height) {
+            val from = y * srcRowStride
+            src.position(from)
+            src.get(row, 0, rowBytes)
+            dst.position(y * rgbaStride)
+            dst.put(row)
+        }
+        dst.clear()
+        return true
+    }
+
+    /** One line, once, describing the first frame the device actually delivered. */
+    private fun reportFirstFrameOnce(reason: String?) {
+        if (firstFrameReported) return
+        firstFrameReported = true
+        val text = if (reason == null) {
+            "first frame: $observedPlanes plane(s), ${firstFrameDescription()}"
+        } else {
+            "first frame rejected ($reason): ${firstFrameDescription()}"
+        }
+        Log.i(TAG, text)
     }
 
     /** Next slot the producer may write, skipping the consumer's slot. */
@@ -293,7 +335,6 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     }
 
     private companion object {
-        val SRGB: ColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
         const val NO_FRAME = 0L
         const val TAG = "RenderaRing"
     }
