@@ -50,6 +50,13 @@ class NativeVisionEngine(
             runCatching { nativeSetCrashFile(path) }
         }
 
+        /**
+         * Names the file the signal handler writes to. Static because the
+         * handler is armed from Application.onCreate, before any engine exists.
+         */
+        @JvmStatic
+        external fun nativeSetCrashFile(path: String?)
+
         /** True when the native library loaded, for the diagnostics screen. */
         @JvmStatic
         fun isNativeLibraryAvailable(): Boolean = libraryLoaded
@@ -247,8 +254,6 @@ class NativeVisionEngine(
      * and the only trace of it is a session line. This is the only way that
      * fault becomes visible. A null path disables the handler.
      */
-
-    private external fun nativeSetCrashFile(path: String?)
 
     private external fun nativeCreate(
         gridWidth: Int, gridHeight: Int, screenWidth: Int, screenHeight: Int

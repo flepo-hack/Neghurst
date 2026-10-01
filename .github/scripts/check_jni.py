@@ -94,7 +94,22 @@ def main() -> int:
 
     # -- 3. symbol parity with the Kotlin external declarations --------------
     cpp_symbols = {s.rsplit("_", 1)[-1] for _, s, _, _ in function_bodies(cpp)}
-    kt_symbols = set(re.findall(r"private external fun (\w+)\(", kt))
+    # Both shapes are legal and both must be checked:
+    #   private external fun f(...)   - an instance method, second parameter jobject
+    #   @JvmStatic external fun f(..) - in a companion, second parameter jclass
+    # Only matching the first is what let an unresolvable symbol through once.
+    kt_symbols = set(
+        re.findall(r"(?:private\s+external|external)\s+fun\s+(\w+)\s*\(", kt)
+    )
+    kt_static = set(
+        re.findall(r"@JvmStatic[\s\S]{0,80}?external\s+fun\s+(\w+)\s*\(", kt)
+    )
+    if "@JvmStatic" in kt:
+        found_static = set(re.findall(r"@JvmStatic[\s\S]{0,80}?external\s+fun\s+(\w+)\s*\(", kt))
+        for name in sorted(found_static):
+            if name not in kt_symbols:
+                print(f"::warning file={KT}::{name} is @JvmStatic but its JNI takes a "
+                      f"jclass; verify the second parameter is jclass, not jobject")
     expected_prefix = "Java_" + PACKAGE.replace(".", "_") + "_"
 
     for _, symbol, _, _ in function_bodies(cpp):
