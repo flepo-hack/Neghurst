@@ -1141,6 +1141,7 @@ class RenderaOverlayService : Service() {
             " got=${framesReceived}" +
             " rejected=${framesRejected}" +
             " empty=${framesEmpty}" +
+            " lag=${frameRing.lag}" +
             " analysed=${framesAnalysed}" +
             " sinceFrameMs=$sinceFrame" +
             " engine=${"%.1f".format(latestVisionMillis)}ms" +
@@ -1493,6 +1494,7 @@ class RenderaOverlayService : Service() {
                                 " dropped=${frameRing.droppedCount}" +
                                 " rejected=${framesRejected}" +
             " empty=${framesEmpty}" +
+            " lag=${frameRing.lag}" +
                                 " noPlane=${frameRing.missingPlaneCount}" +
                                 " shortPlane=${frameRing.shortPlaneCount}" +
                                 " native=${detector?.isNativeAvailable}" +
@@ -1865,6 +1867,10 @@ class RenderaOverlayService : Service() {
                 framesReceived == 0L && framesEmpty > 0L ->
                     "The reader is firing but hands over nothing " +
                         "(${framesEmpty} empty acquires)."
+                frameRing.lag > 8L ->
+                    "The analyser is behind by ${frameRing.lag} frames " +
+                        "(${frameRing.droppedCount} overwritten). " +
+                        "Frames are arriving faster than they can be analysed."
                 framesReceived == 0L ->
                     "The device is not sending frames. ${lastFrameAge()}"
                 frameRing.copyFailureCount > 0L ->

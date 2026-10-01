@@ -84,6 +84,7 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
     // diagnostics. A 64 bit read is not atomic on 32-bit ART, so these are
     // volatile.
     @Volatile private var consumedFrames = 0L
+    @Volatile private var framesPublished = 0L
     @Volatile private var droppedFrames = 0L
     @Volatile private var rejectedFrames = 0L
     @Volatile private var copyErrors = 0L
@@ -96,6 +97,15 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
 
     val droppedCount: Long get() = droppedFrames
     val consumedCount: Long get() = consumedFrames
+
+    /**
+     * Frames published but not yet taken.
+     *
+     * The number that matters when the vision loop cannot keep up. The log of a
+     * stalled capture shows it climbing: pool=30 against consumed=5 means
+     * twenty-five frames were waiting and none of them had been analysed.
+     */
+    val lag: Long get() = (framesPublished - consumedFrames).coerceAtLeast(0L)
     val rejectedCount: Long get() = rejectedFrames
 
     /** Copies that threw. Non zero means the ring is mis-configured, not the device. */
@@ -170,8 +180,14 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
 
         synchronized(lock) {
             val idx = nextFreeSlot() ?: return false
-            if (idx == publishedSlot) {
-                // Overwriting the newest unconsumed frame: that frame is lost.
+            // An overwrite means a frame the consumer never saw is gone. The
+            // previous test was `idx == publishedSlot`, which can never be true:
+            // the cursor alternates between the two non-borrowed slots, so by
+            // the time it comes back to the published one it has moved on. The
+            // counter therefore stayed at zero while the ring was overwriting
+            // constantly - which is exactly the number a report needed and the
+            // one that was lying.
+            if (publishedId != NO_FRAME && consumedId != publishedId) {
                 droppedFrames++
             }
             val dst = slots[idx] ?: return false
@@ -192,6 +208,7 @@ class CaptureFrameRing(private val poolSize: Int = 3) {
             reportFirstFrameOnce(null)
 
             publishedSlot = idx
+            framesPublished++
             publishedId = if (publishedId == Long.MAX_VALUE) 1L else publishedId + 1
             return true
         }
