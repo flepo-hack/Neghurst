@@ -193,8 +193,6 @@ class RenderaOverlayService : Service() {
          */
         private const val MAX_IMAGES = 2
 
-        /** Where the native engine records a signal-level fault. */
-        private const val NATIVE_CRASH_FILE = "rendera-native-crash.txt"
 
         /**
          * How long the foreground app must disagree with the target before
@@ -1352,14 +1350,7 @@ class RenderaOverlayService : Service() {
         if (detector != null) return
         if (displayWidth <= 0 || displayHeight <= 0) runCatching { resolveDisplayGeometry() }
         val (gw, gh) = ScreenThreatDetector.gridForCapture(captureWidth, captureHeight)
-        // Named so a signal-level fault in the engine leaves a file instead of
-        // just a dead process. Installed by the engine before it is constructed.
-        val crashFile = runCatching {
-            java.io.File(getExternalFilesDir(null) ?: filesDir, NATIVE_CRASH_FILE)
-        }.getOrNull()
-        val d = ScreenThreatDetector(
-            gw, gh, displayWidth, displayHeight, crashFile?.absolutePath
-        )
+        val d = ScreenThreatDetector(gw, gh, displayWidth, displayHeight)
         anchors = prefs.anchorsFor(displayWidth, displayHeight)
         synchronized(detectorLock) {
             d.setAnchors(anchors)

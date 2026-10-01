@@ -22,6 +22,15 @@ class RenderaApp : Application() {
     }
 
     override fun onCreate() {
+        // Armed here, before any service or capture exists. A whole-screen
+        // capture dies during the handshake, which is long before the engine is
+        // constructed, and a handler installed at engine construction would not
+        // have been there yet - so the crash left no record at all.
+        runCatching {
+            val dir = getExternalFilesDir(null) ?: filesDir
+            com.example.vision.nativebridge.NativeVisionEngine
+                .installCrashRecorder(java.io.File(dir, "rendera-native-crash.txt").absolutePath)
+        }
         super.onCreate()
         instance = this
         createNotificationChannel()

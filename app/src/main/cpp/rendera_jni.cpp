@@ -216,6 +216,22 @@ void installCrashHandler() {
 }  // namespace
 
 /**
+ * Installs the signal handler when the library is loaded.
+ *
+ * Not on first use: the handler used to be installed by nativeCreate, which runs
+ * at the end of startup, long after the capture handshake. A fault during that
+ * handshake - which is where a whole-screen capture dies - therefore had no
+ * handler and left no record at all, so "no crash file" meant "no signal fired
+ * OR the handler was not there yet", which are different problems.
+ */
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+    (void)vm;
+    (void)reserved;
+    installCrashHandler();
+    return JNI_VERSION_1_6;
+}
+
+/**
  * Names the file the signal handler writes to, and installs the handler.
  *
  * Must be called before the engine is created. A path of null disables the

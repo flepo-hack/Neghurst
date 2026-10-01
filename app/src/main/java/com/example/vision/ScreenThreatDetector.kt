@@ -41,9 +41,7 @@ class ScreenThreatDetector(
     gridWidth: Int = DEFAULT_GRID_WIDTH,
     gridHeight: Int = DEFAULT_GRID_HEIGHT,
     screenWidth: Int = 1080,
-    screenHeight: Int = 1920,
-    /** Where the engine should record a native fault. See [NativeVisionEngine]. */
-    private val nativeCrashFile: String? = null
+    screenHeight: Int = 1920
 ) : AutoCloseable {
 
     companion object {
@@ -71,9 +69,7 @@ class ScreenThreatDetector(
         }
     }
 
-    private val engine = NativeVisionEngine(
-        gridWidth, gridHeight, screenWidth, screenHeight, nativeCrashFile
-    )
+    private val engine = NativeVisionEngine(gridWidth, gridHeight, screenWidth, screenHeight)
 
     /** True when the compiled native engine is present and open. */
     val isNativeAvailable: Boolean get() = engine.isOpen

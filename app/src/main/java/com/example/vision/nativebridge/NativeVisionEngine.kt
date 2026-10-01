@@ -36,6 +36,24 @@ class NativeVisionEngine(
     companion object {
         private const val TAG = "NativeVisionEngine"
 
+        /**
+         * Loads the library and names the file its signal handler writes to.
+         *
+         * Called from Application.onCreate so the handler is armed before any
+         * service, capture or engine exists. Safe to call more than once, and
+         * safe to call when the library will not load - a host without the .so
+         * simply has no handler, which is what a JVM unit test wants anyway.
+         */
+        @JvmStatic
+        fun installCrashRecorder(path: String?) {
+            if (!libraryLoaded) return
+            runCatching { nativeSetCrashFile(path) }
+        }
+
+        /** True when the native library loaded, for the diagnostics screen. */
+        @JvmStatic
+        fun isNativeLibraryAvailable(): Boolean = libraryLoaded
+
         /** Number of floats the native layer writes. Must match `kOutFloatCount`. */
         const val OUT_FLOATS = 72
 
@@ -88,8 +106,6 @@ class NativeVisionEngine(
 
     init {
         if (libraryLoaded) {
-            // Before the engine exists, so a fault in construction is recorded.
-            runCatching { nativeSetCrashFile(crashFile) }
             handle = nativeCreate(gridWidth, gridHeight, screenWidth, screenHeight)
             if (handle == 0L) {
                 Log.e(TAG, "nativeCreate returned a null handle")
