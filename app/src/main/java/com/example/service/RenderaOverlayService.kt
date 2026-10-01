@@ -295,6 +295,7 @@ class RenderaOverlayService : Service() {
     // identical from the outside and were guessed at repeatedly.
     @Volatile private var framesReceived = 0L
     @Volatile private var framesRejected = 0L
+    @Volatile private var framesEmpty = 0L
     @Volatile private var framesAnalysed = 0L
     @Volatile private var lastFrameAtMs = 0L
 
@@ -634,8 +635,33 @@ class RenderaOverlayService : Service() {
         runCatching { events.trace("fgs:before-notification") }
         val notification = buildNotification()
         runCatching { events.trace("fgs:before-startForeground") }
-        startForeground(NOTIFICATION_ID, notification)
-        runCatching { events.trace("fgs:after-startForeground") }
+        try {
+            // Typed explicitly. The two-argument form is not "untyped": the
+            // platform substitutes the manifest type, which here is
+            // mediaProjection, so the media projection permission check runs
+            // either way - and from Android 14 it fails when the consent token
+            // has already been spent, which is a re-grant only the user can do.
+            startForeground(
+                NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+            runCatching { events.trace("fgs:after-startForeground") }
+        } catch (t: SecurityException) {
+            runCatching { events.trace("fgs:refused") }
+            // Spoken in the user's terms. "Start failed: SecurityException" told
+            // the user nothing they could act on.
+            val spent = t.message?.contains("MEDIA_PROJECTION") == true
+            val msg = if (spent) {
+                "Screen capture permission was refused. Approve the capture " +
+                    "prompt again to continue."
+            } else {
+                "Foreground service refused: ${t.message ?: "unknown reason"}"
+            }
+            Log.e(TAG, msg, t)
+            runCatching { events.error("start", msg.take(120), t) }
+            startFailure = msg
+            throw t
+        }
     }
 
     /**
@@ -851,7 +877,15 @@ class RenderaOverlayService : Service() {
     private fun onFrameAvailable(reader: ImageReader) {
         var image: Image? = null
         try {
-            image = reader.acquireLatestImage() ?: return
+            // A null acquire is NOT the same as "no frame yet": it means the
+            // listener fired but the reader had nothing to hand over, and the
+            // old `?: return` made that completely invisible - the counters
+            // simply stopped moving with nothing recorded anywhere.
+            image = reader.acquireLatestImage()
+            if (image == null) {
+                framesEmpty++
+                return
+            }
             val ok = frameRing.publish(image)
             if (ok) framesReceived++ else framesRejected++
         } catch (t: Throwable) {
@@ -1108,6 +1142,7 @@ class RenderaOverlayService : Service() {
             " fps=$latestFps" +
             " got=${framesReceived}" +
             " rejected=${framesRejected}" +
+            " empty=${framesEmpty}" +
             " analysed=${framesAnalysed}" +
             " sinceFrameMs=$sinceFrame" +
             " engine=${"%.1f".format(latestVisionMillis)}ms" +
@@ -1466,6 +1501,7 @@ class RenderaOverlayService : Service() {
                                 " pool=${framesReceived} consumed=${frameRing.consumedCount}" +
                                 " dropped=${frameRing.droppedCount}" +
                                 " rejected=${framesRejected}" +
+            " empty=${framesEmpty}" +
                                 " noPlane=${frameRing.missingPlaneCount}" +
                                 " shortPlane=${frameRing.shortPlaneCount}" +
                                 " native=${detector?.isNativeAvailable}" +
@@ -1835,6 +1871,9 @@ class RenderaOverlayService : Service() {
                     "The frame plane is not RGBA " +
                         "(${frameRing.shortPlaneCount} frames). " +
                         frameRing.firstFrameDescription()
+                framesReceived == 0L && framesEmpty > 0L ->
+                    "The reader is firing but hands over nothing " +
+                        "(${framesEmpty} empty acquires)."
                 framesReceived == 0L ->
                     "The device is not sending frames. ${lastFrameAge()}"
                 frameRing.copyFailureCount > 0L ->
@@ -2622,6 +2661,7 @@ class RenderaOverlayService : Service() {
                 "(format $CAPTURE_FORMAT_NAME, " +
                 "got ${framesReceived}, rejected ${framesRejected}, " +
                 "copy failures ${frameRing.copyFailureCount}, " +
+                "empty acquires ${framesEmpty}, " +
                 "no plane ${frameRing.missingPlaneCount}, " +
                 "short plane ${frameRing.shortPlaneCount}, " +
                 "analysed ${framesAnalysed})"
