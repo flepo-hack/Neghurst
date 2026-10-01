@@ -161,6 +161,18 @@ class RenderaOverlayService : Service() {
         private const val CAPTURE_LONG_EDGE_EVEN = 480
 
         private const val VISION_IDLE_SLEEP_MS = 4L
+
+        /**
+         * Target analysis rate.
+         *
+         * 20 Hz. A Brawl Stars projectile crosses its danger radius in well
+         * under a tenth of a second, so 20 samples a second resolves it with
+         * room to spare, and the reaction horizon the solver works in is a
+         * fraction of a second anyway. Anything higher buys resolution nobody
+         * asked for at the cost of the cores the game needs.
+         */
+        private const val VISION_TARGET_HZ = 20L
+        private const val VISION_MIN_FRAME_MS = 1000L / VISION_TARGET_HZ
         private const val STATS_INTERVAL_MS = 1000L
 
         /**
@@ -187,11 +199,16 @@ class RenderaOverlayService : Service() {
         const val CAPTURE_FORMAT_NAME = "RGBA_8888"
 
         /**
-         * Buffers the reader may hold. Two is the documented minimum for a
-         * usable `ImageReader`, and it lets a frame be produced while the
-         * previous one is still being analysed.
+         * Buffers the reader may hold.
+         *
+         * Four, not the documented minimum of two. A `VirtualDisplay` blocks its
+         * producer once every slot is held, and the producer is the compositor -
+         * so running the reader at two slots means a burst stalls the game being
+         * captured, which is worse than any amount of dropped frame. Four gives
+         * the compositor somewhere to put a frame while the analyser is busy,
+         * and the ring's three slots do the actual smoothing.
          */
-        private const val MAX_IMAGES = 2
+        private const val MAX_IMAGES = 4
 
 
         /**
@@ -1504,6 +1521,22 @@ class RenderaOverlayService : Service() {
                     beatFramesReceived = framesReceived
                     beatAnalysed = framesAnalysed
                 }
+                // Never analyse faster than the engine is meant to run, and
+                // never let the capture rate dictate the analysis rate.
+                //
+                // There was no delay on this path at all: the loop took a frame,
+                // analysed it to completion, and took the next one immediately.
+                // With the game rendering at 30-120 fps that pins every core and
+                // starves everything else, which is what the log showed - lag
+                // pinned at the ring's three slots, dropped climbing, and the
+                // capture stalling entirely once the compositor had nowhere to
+                // put a frame.
+                //
+                // Excess frames are meant to be dropped. acquireLatestImage
+                // discards the older ones by design, so a slow analyser costs
+                // temporal resolution and nothing else - whereas a fast one
+                // costs the whole device.
+                paceVisionLoop()
                 val frame = frameRing.take()
                 if (frame == null) {
                     delay(VISION_IDLE_SLEEP_MS)
@@ -1586,6 +1619,27 @@ class RenderaOverlayService : Service() {
                 }
             }
         }
+    }
+
+    private var nextVisionSlotMs = 0L
+
+    /**
+     * Blocks until the next analysis slot is due.
+     *
+     * Called once per iteration, on both the busy and the idle path, so the
+     * analysis rate is set by this and not by how fast the device happens to
+     * render. Suspending rather than spinning: the loop already runs on
+     * Dispatchers.Default and must not hold a core awake waiting for a slot.
+     */
+    private suspend fun paceVisionLoop() {
+        val now = SystemClock.elapsedRealtime()
+        val wait = nextVisionSlotMs - now
+        if (wait > 0) {
+            delay(wait)
+        }
+        // Advance from the slot time, not from now: a slow frame must not push
+        // every later slot back and make the rate drift downward.
+        nextVisionSlotMs = maxOf(nextVisionSlotMs + VISION_MIN_FRAME_MS, now)
     }
 
     /**
